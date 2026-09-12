@@ -1,0 +1,146 @@
+// tmrclock_tests.nv — two clocks, and the one that is allowed to jump.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`.
+//
+// THE ARITHMETIC IS `[]`, so the interesting case — a system clock
+// stepping forward by an hour in the middle of a program — is written
+// by passing two numbers rather than by waiting an hour or by setting
+// the machine's clock.
+
+use std.test
+use std.time
+use tmrclock
+
+fn mono(ms: Int) -> TmrMonoTime
+    tmrclock.mono_of_ms(ms)
+
+fn wall(ms: Int) -> TmrWallTime
+    tmrclock.wall_of_unix_ms(ms)
+
+@test
+fn test_a_monotonic_difference_is_a_duration() [io]
+    test.case("half a second")
+    test.assert(tmrclock.mono_since(mono(1500), mono(1000)).ms() == 500)
+
+@test
+fn test_adding_a_duration_moves_a_monotonic_time() [io]
+    test.case("a second later")
+    test.assert(tmrclock.mono_ms(tmrclock.mono_add(mono(1000), Duration.of_secs(1))) == 2000)
+
+@test
+fn test_a_monotonic_time_can_be_compared() [io]
+    test.case("later")
+    test.assert(tmrclock.mono_after(mono(2000), mono(1000)))
+
+    test.case("not earlier")
+    test.assert(not tmrclock.mono_after(mono(1000), mono(2000)))
+
+@test
+fn test_adding_a_duration_moves_a_wall_time_too() [io]
+    // The same arithmetic on the other clock, and the reason it exists
+    // at all: an alarm is usually written as "an hour from the time in
+    // that timestamp", and the addition happens before the conversion
+    // to a monotonic deadline rather than after it.
+    test.case("an hour later")
+    test.assert(tmrclock.wall_unix_ms(tmrclock.wall_add(wall(0), Duration.of_secs(3600)))
+                == 3600000)
+
+@test
+fn test_a_wall_time_is_milliseconds_since_the_epoch() [io]
+    // What a person means by "a time", and the unit a timestamp
+    // arrives in from everywhere else.
+    test.case("round trip")
+    test.assert(tmrclock.wall_unix_ms(wall(1789000000000)) == 1789000000000)
+
+@test
+fn test_a_wall_difference_is_also_a_duration_and_means_less() [io]
+    // Meaningful only when no step happened in between, which is
+    // exactly what nothing can tell you after the fact — which is why
+    // `mono_since` exists and this one is for rendering a difference
+    // to a person.
+    test.case("a minute apart")
+    test.assert(tmrclock.wall_since(wall(60000), wall(0)).secs() == 60.0)
+
+@test
+fn test_a_wall_deadline_becomes_a_monotonic_one_through_the_offset() [io]
+    // The only bridge between the two clocks, and it is a function
+    // rather than an overload of `schedule` so that the conversion is
+    // written where a reader can see it happening.
+    let o = TmrClockOffset { mono: mono(5000), wall: wall(1789000000000) }
+
+    test.case("ten seconds in the future, on both clocks")
+    test.assert(tmrclock.mono_ms(tmrclock.wall_deadline_to_mono(o, wall(1789000010000))) == 15000)
+
+@test
+fn test_a_clock_that_has_not_moved_relative_to_the_other_has_not_stepped() [io]
+    // The ordinary case, which must not be reported as a step —
+    // otherwise a program with alarms reschedules them every tick.
+    let was = TmrClockOffset { mono: mono(1000), wall: wall(1789000000000) }
+    let now = TmrClockOffset { mono: mono(4000), wall: wall(1789000003000) }
+
+    test.case("three seconds passed on both")
+    test.assert(tmrclock.clock_step(was, now).ms() == 0)
+
+    test.case("so nothing stepped")
+    test.assert(not tmrclock.clock_stepped(was, now, Duration.of_secs(1)))
+
+@test
+fn test_a_clock_set_forward_by_an_hour_is_a_step() [io]
+    // NTP correcting a machine that has been off, a virtual machine
+    // resuming from a snapshot, a user fixing the time.  Every alarm
+    // derived from the old offset is now an hour wrong.
+    let was = TmrClockOffset { mono: mono(1000), wall: wall(1789000000000) }
+    let now = TmrClockOffset { mono: mono(2000), wall: wall(1789003601000) }
+
+    test.case("an hour appeared")
+    test.assert(tmrclock.clock_step(was, now).secs() == 3600.0)
+
+    test.case("and that is a step")
+    test.assert(tmrclock.clock_stepped(was, now, Duration.of_secs(1)))
+
+@test
+fn test_a_clock_set_backwards_is_a_step_too() [io]
+    // The direction that turns a naive wall-clock timeout into one
+    // that never fires.
+    let was = TmrClockOffset { mono: mono(1000), wall: wall(1789003600000) }
+    let now = TmrClockOffset { mono: mono(2000), wall: wall(1789000001000) }
+
+    test.case("time went backwards")
+    test.assert(tmrclock.clock_step(was, now).is_negative())
+
+    test.case("and it is still a step")
+    test.assert(tmrclock.clock_stepped(was, now, Duration.of_secs(1)))
+
+@test
+fn test_a_slew_is_not_a_step() [io]
+    // NTP's ordinary behaviour is to run the clock slightly fast or
+    // slow until it agrees.  A program that rescheduled on every
+    // millisecond of drift would reschedule constantly and for no
+    // reason, which is why the check takes a tolerance.
+    let was = TmrClockOffset { mono: mono(1000), wall: wall(1789000000000) }
+    let now = TmrClockOffset { mono: mono(2000), wall: wall(1789000001020) }
+
+    test.case("twenty milliseconds of drift")
+    test.assert(tmrclock.clock_step(was, now).ms() == 20)
+
+    test.case("under a one-second tolerance, which is not a step")
+    test.assert(not tmrclock.clock_stepped(was, now, Duration.of_secs(1)))
+
+@test
+fn test_the_clocks_can_be_read_and_the_pair_can_be_read_together() [io, time]
+    // The three `[time]` functions in the package, and the only three.
+    // The pair is read in one call so that a step between two separate
+    // reads cannot put them out of agreement by exactly the thing
+    // being measured.
+    let m = tmrclock.mono_now()
+    let w = tmrclock.wall_now()
+    let o = tmrclock.clock_offset()
+
+    test.case("a monotonic reading")
+    test.assert(tmrclock.mono_ms(m) >= 0)
+
+    test.case("a wall reading, well past the epoch")
+    test.assert(tmrclock.wall_unix_ms(w) > 0)
+
+    test.case("and the pair agrees with the wall clock it was read with")
+    test.assert(tmrclock.wall_after(o.wall, wall(0)))

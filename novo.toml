@@ -1,0 +1,58 @@
+[package]
+name        = "timer-nv"
+version     = "0.0.1"
+description = "Deadlines and intervals for a program with one loop and many of them: one-shot and periodic timers in a wheel the caller polls, answering how long its next poll should block and which timers came due.  Monotonic and wall-clock deadlines are two types, because a timeout keyed on a clock that can be set backwards is a famous bug.  Three lateness policies, deterministic jitter, a stopwatch and a token bucket.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `host`, and TWO FUNCTIONS IN THE WHOLE PACKAGE DECLARE ANYTHING:
+# `tmrclock.mono_now` and `tmrclock.wall_now`, both `[time]`.
+# Everything else — the wheel, the policies, the jitter, the
+# stopwatch, the token bucket — is `[]`, because a timer that a caller
+# polls is arithmetic over a number the caller supplied.
+#
+# `layer = "host"` AND NOT `layer = "core"` WITH `host_modules`.  The
+# narrower-layer-with-named-modules form is for a package whose
+# SUBJECT is the pure half, and this package's subject is time — a
+# `core` package has no clock at all, and one that published a timer
+# API with no way to read a clock would be published half-built.  A
+# `core` consumer that wants only the wheel gets it by depending on
+# this package and never calling those two functions, which is a
+# claim the effect checker enforces on the consumer's own signatures.
+layer       = "host"
+
+category    = "time"
+
+tags        = ["timer", "deadline", "interval", "timer-wheel", "debounce", "rate-limit", "token-bucket", "stopwatch", "monotonic"]
+repository  = "https://github.com/novolang/timer-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Many deadlines, one loop, one clock read"
+
+[dependencies]
+# None, and it is a claim rather than an oversight.
+#
+# A duration is `std.time`'s `Duration`, which is in the standard
+# library and which a package may not redeclare — so there is nothing
+# to depend on for the one type that crosses this package's surface.
+# The wheel is a comparison and an insertion, the policies are three
+# ways of adding a period to a deadline, the jitter is a multiply and a
+# modulo, and the token bucket is a subtraction.
+#
+# humantime-nv is the package a CALLER reaches for beside this one: a
+# configuration file says `interval = "5m"` and humantime-nv turns that
+# into seconds, which is `Duration.of_secs` away from what
+# `tmrwheel.schedule_after` takes.  It is a dependency of the program,
+# not of this package, because a program that builds its intervals in
+# code should not carry a duration parser it never calls.

@@ -1,0 +1,258 @@
+// tmrextra.nv — the stopwatch and the rate limiter every tool
+// rewrites.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// `[]` THROUGHOUT, like the wheel and for the same reason: `now` is an
+// argument.  A stopwatch that read the clock itself would be a
+// stopwatch a test has to wait for, and a rate limiter that read the
+// clock itself would be a rate limiter a test cannot push past its
+// limit without actually waiting.
+//
+// THE STOPWATCH IS TWO FIELDS AND EVERYBODY GETS ONE OF THEM WRONG.
+// Elapsed time is what has accumulated PLUS, if it is running, the
+// time since it was last started — and a stopwatch written as a single
+// start timestamp reports nonsense the first time anything pauses it,
+// which for a build timer is the first time it waits on a lock.
+//
+// THE TOKEN BUCKET IS THE RATE LIMITER WORTH HAVING.  A counter reset
+// every second allows twice the rate across a boundary — sixty in the
+// last millisecond of one second and sixty in the first of the next —
+// and the shape that does not is a bucket that refills continuously.
+// It also allows a BURST on purpose, which is what makes it the right
+// one for a program with a user in it: somebody who has been idle can
+// do several things at once, and somebody hammering cannot.
+//
+// REFILL IS COMPUTED, NOT TICKED.  There is no timer behind a bucket:
+// `bucket_take` works out how much has refilled since the last call
+// from the `now` it was handed.  A bucket nobody touches for an hour
+// costs nothing and is correct when it is next touched.
+
+use tmrclock
+
+// A stopwatch that can be paused.
+pub struct TmrStopwatch
+    // When the current run began, meaningful only while `running`.
+    started: tmrclock.TmrMonoTime
+    // What earlier runs added up to.
+    accumulated: Duration
+    running: Bool
+
+// A stopped stopwatch reading zero.
+//
+// ```novo
+// use tmrextra
+//
+// fn fresh() -> TmrStopwatch
+//     tmrextra.stopwatch_new()
+// ```
+pub fn stopwatch_new() -> TmrStopwatch []
+    todo("timer-nv.tmrextra.stopwatch_new")
+
+// Start, or resume.
+//
+// Starting an already-running stopwatch changes nothing, rather than
+// losing the elapsed time by resetting `started` — which is the shape
+// of the bug this function is careful about.
+//
+// ```novo
+// use tmrclock
+// use tmrextra
+//
+// fn go(s: TmrStopwatch, now: TmrMonoTime) -> TmrStopwatch
+//     tmrextra.stopwatch_start(s, now)
+// ```
+pub fn stopwatch_start(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> TmrStopwatch []
+    todo("timer-nv.tmrextra.stopwatch_start")
+
+// Pause, folding this run into the accumulated total.
+//
+// ```novo
+// use tmrclock
+// use tmrextra
+//
+// fn pause(s: TmrStopwatch, now: TmrMonoTime) -> TmrStopwatch
+//     tmrextra.stopwatch_stop(s, now)
+// ```
+pub fn stopwatch_stop(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> TmrStopwatch []
+    todo("timer-nv.tmrextra.stopwatch_stop")
+
+// Back to zero, and stopped.
+//
+// ```novo
+// use tmrextra
+//
+// fn zero(s: TmrStopwatch) -> TmrStopwatch
+//     tmrextra.stopwatch_reset(s)
+// ```
+pub fn stopwatch_reset(s: TmrStopwatch) -> TmrStopwatch []
+    todo("timer-nv.tmrextra.stopwatch_reset")
+
+// How long it has run altogether.
+//
+// The accumulated total, plus the current run when it is running.
+// Takes `now` because the second half of that sentence needs it, and
+// because a stopwatch that read a clock could not be asserted on.
+//
+// ```novo
+// use std.time
+// use tmrclock
+// use tmrextra
+//
+// fn so_far(s: TmrStopwatch, now: TmrMonoTime) -> Duration
+//     tmrextra.stopwatch_elapsed(s, now)
+// ```
+pub fn stopwatch_elapsed(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> Duration []
+    todo("timer-nv.tmrextra.stopwatch_elapsed")
+
+// Whether it is running.
+//
+// ```novo
+// use tmrextra
+//
+// fn ticking(s: TmrStopwatch) -> Bool
+//     tmrextra.stopwatch_is_running(s)
+// ```
+pub fn stopwatch_is_running(s: TmrStopwatch) -> Bool []
+    todo("timer-nv.tmrextra.stopwatch_is_running")
+
+// ── The token bucket ───────────────────────────────────────────────
+
+// A bucket that refills at a steady rate and holds a burst.
+//
+// Tokens are kept in THOUSANDTHS so that a rate slower than one per
+// second — four an hour, say — is expressible and refills smoothly
+// rather than in jumps.  `bucket_tokens` answers whole tokens, which
+// is what a caller asks about.
+pub struct TmrBucket
+    // The most it will hold, in whole tokens.  This is the burst.
+    capacity: Int
+    // What it holds now, in thousandths of a token.
+    milli_tokens: Int
+    // How fast it refills, in thousandths of a token per second.
+    milli_per_second: Int
+    // When `milli_tokens` was last brought up to date.
+    last: tmrclock.TmrMonoTime
+
+// What a take decided.
+pub struct TmrTake
+    bucket: TmrBucket
+    allowed: Bool
+    // How long until the request would be allowed, or zero when it was
+    // allowed.  What a caller puts in a `Retry-After`, and what it
+    // hands to `tmrwheel.schedule_after` to try again — which is the
+    // reason a refusal answers a duration rather than just `false`.
+    retry_after: Duration
+
+// A bucket that allows `per_second` steadily and `capacity` at once,
+// starting full.
+//
+// Starting full is the friendly choice and the usual one: a program
+// that had to wait for its first request would look broken.  A caller
+// that wants otherwise takes from it immediately.
+//
+// ```novo
+// use tmrclock
+// use tmrextra
+//
+// fn limiter(now: TmrMonoTime) -> TmrBucket
+//     tmrextra.bucket_new(10, 5, now)
+// ```
+pub fn bucket_new(capacity: Int, per_second: Int, now: tmrclock.TmrMonoTime) -> TmrBucket []
+    todo("timer-nv.tmrextra.bucket_new")
+
+// A bucket with a rate slower than one per second.
+//
+// Four an hour is `bucket_per_interval(4, Duration.of_secs(3600), now)`,
+// which a per-second rate cannot express as an integer at all.
+//
+// ```novo
+// use std.time
+// use tmrclock
+// use tmrextra
+//
+// fn hourly(now: TmrMonoTime) -> TmrBucket
+//     tmrextra.bucket_per_interval(4, Duration.of_secs(3600), now)
+// ```
+pub fn bucket_per_interval(count: Int, per: Duration, now: tmrclock.TmrMonoTime) -> TmrBucket []
+    todo("timer-nv.tmrextra.bucket_per_interval")
+
+// Take `n` tokens if they are there.
+//
+// Refills from `now` first, so a bucket nobody has touched for an hour
+// costs nothing until it is asked and is correct when it is.  A
+// refusal takes nothing — no partial spend, because a caller that was
+// refused will ask again and a bucket that had drained on the refusals
+// would never allow anything.
+//
+// ```novo
+// use tmrclock
+// use tmrextra
+//
+// fn may_i(b: TmrBucket, now: TmrMonoTime) -> TmrTake
+//     tmrextra.bucket_take(b, 1, now)
+// ```
+pub fn bucket_take(b: TmrBucket, n: Int, now: tmrclock.TmrMonoTime) -> TmrTake []
+    todo("timer-nv.tmrextra.bucket_take")
+
+// How many whole tokens it holds at `now`.
+//
+// For a status display, and for a caller deciding how much work to
+// hand over at once.
+//
+// ```novo
+// use tmrclock
+// use tmrextra
+//
+// fn budget(b: TmrBucket, now: TmrMonoTime) -> Int
+//     tmrextra.bucket_tokens(b, now)
+// ```
+pub fn bucket_tokens(b: TmrBucket, now: tmrclock.TmrMonoTime) -> Int []
+    todo("timer-nv.tmrextra.bucket_tokens")
+
+// How long until `n` tokens would be available.
+//
+// Zero when they already are.  The question without the side effect,
+// for a caller that wants to schedule rather than to retry.
+//
+// ```novo
+// use std.time
+// use tmrclock
+// use tmrextra
+//
+// fn wait(b: TmrBucket, now: TmrMonoTime) -> Duration
+//     tmrextra.bucket_wait_for(b, 1, now)
+// ```
+pub fn bucket_wait_for(b: TmrBucket, n: Int, now: tmrclock.TmrMonoTime) -> Duration []
+    todo("timer-nv.tmrextra.bucket_wait_for")
+
+// Fill it to capacity.
+//
+// For a caller whose limit was lifted — a rate limit that reset
+// because a server said so, a quota that renewed.
+//
+// ```novo
+// use tmrclock
+// use tmrextra
+//
+// fn reset(b: TmrBucket, now: TmrMonoTime) -> TmrBucket
+//     tmrextra.bucket_refill(b, now)
+// ```
+pub fn bucket_refill(b: TmrBucket, now: tmrclock.TmrMonoTime) -> TmrBucket []
+    todo("timer-nv.tmrextra.bucket_refill")
+
+// Empty it.
+//
+// For a caller whose limit was imposed — a server that answered
+// "slow down", where the right response is to stop rather than to keep
+// spending what is left.
+//
+// ```novo
+// use tmrclock
+// use tmrextra
+//
+// fn back_off(b: TmrBucket, now: TmrMonoTime) -> TmrBucket
+//     tmrextra.bucket_drain(b, now)
+// ```
+pub fn bucket_drain(b: TmrBucket, now: tmrclock.TmrMonoTime) -> TmrBucket []
+    todo("timer-nv.tmrextra.bucket_drain")

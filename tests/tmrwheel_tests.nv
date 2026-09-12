@@ -1,0 +1,323 @@
+// tmrwheel_tests.nv — the deadline a poll gets, and the three answers
+// to being late.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: timer-nv.<module>.<fn>`.
+//
+// NOTHING IN THIS FILE WAITS, and that is the module's claim working.
+// `now` is an argument, so a test of a timer that fires in an hour
+// costs nothing and takes no longer than one that fires in a
+// millisecond — and a test of a loop that fell two seconds behind is
+// written by passing a number two seconds later.
+
+use std.list
+use std.test
+use tmrclock
+use tmrwheel
+
+fn at(ms: Int) -> TmrMonoTime
+    tmrclock.mono_of_ms(ms)
+
+@test
+fn test_an_empty_wheel_tells_a_poll_to_block_indefinitely() [io]
+    // `-1` is what `poll` takes for "no deadline", and what
+    // `ptypoll.wait_ready` and `io.wait_either` take, so the number
+    // goes straight through with no arithmetic in between.
+    let w = tmrwheel.wheel_new()
+
+    test.case("no timeout")
+    test.assert(tmrwheel.timeout_ms(w, at(0)) == TMR_NO_TIMEOUT)
+
+    test.case("and nothing is due")
+    test.assert_none(tmrwheel.next_due(w))
+
+    test.case("and it says it is idle")
+    test.assert(tmrwheel.is_idle(w))
+
+@test
+fn test_the_timeout_is_the_time_left_until_the_nearest_deadline() [io]
+    // The bridge, and the whole reason the wheel exists in this shape:
+    // a pump that was going to block anyway blocks for exactly as long
+    // as its nearest timer allows.
+    let s = tmrwheel.schedule(tmrwheel.wheel_new(), at(1000), TmrOneShot, 1)
+
+    test.case("a second away")
+    test.assert(tmrwheel.timeout_ms(s.wheel, at(0)) == 1000)
+
+    test.case("and less as time passes")
+    test.assert(tmrwheel.timeout_ms(s.wheel, at(700)) == 300)
+
+@test
+fn test_a_deadline_already_passed_asks_for_no_wait_at_all() [io]
+    // Zero and not a negative number: a poll handed a negative number
+    // blocks forever, which is the opposite of what a due timer wants.
+    let s = tmrwheel.schedule(tmrwheel.wheel_new(), at(100), TmrOneShot, 1)
+
+    test.case("due")
+    test.assert(tmrwheel.timeout_ms(s.wheel, at(500)) == 0)
+
+@test
+fn test_the_nearest_deadline_wins_whatever_order_they_were_added_in() [io]
+    var w = tmrwheel.wheel_new()
+    w = tmrwheel.schedule(w, at(5000), TmrOneShot, 1).wheel
+    w = tmrwheel.schedule(w, at(200), TmrOneShot, 2).wheel
+    w = tmrwheel.schedule(w, at(3000), TmrOneShot, 3).wheel
+
+    test.case("the soonest")
+    test.assert(tmrwheel.timeout_ms(w, at(0)) == 200)
+
+@test
+fn test_a_one_shot_fires_once_and_is_gone() [io]
+    let s = tmrwheel.schedule(tmrwheel.wheel_new(), at(100), TmrOneShot, 7)
+    let first = tmrwheel.fire_due(s.wheel, at(100))
+
+    test.case("it fired")
+    test.assert(list.len(first.fired) == 1)
+
+    test.case("carrying the caller's tag")
+    test.assert(first.fired[0].tag == 7)
+
+    test.case("and the wheel is empty")
+    test.assert(tmrwheel.is_idle(first.wheel))
+
+@test
+fn test_nothing_fires_before_it_is_due() [io]
+    let s = tmrwheel.schedule(tmrwheel.wheel_new(), at(100), TmrOneShot, 1)
+    let step = tmrwheel.fire_due(s.wheel, at(99))
+
+    test.case("not yet")
+    test.assert(list.len(step.fired) == 0)
+
+    test.case("and it is still scheduled")
+    test.assert(tmrwheel.is_scheduled(step.wheel, s.id))
+
+@test
+fn test_firing_order_is_by_deadline_and_ties_go_in_schedule_order() [io]
+    // A program whose timers depend on each other gets the same
+    // sequence every run, which is what makes a bug in one of them
+    // reproducible at all.
+    var w = tmrwheel.wheel_new()
+    w = tmrwheel.schedule(w, at(100), TmrOneShot, 1).wheel
+    w = tmrwheel.schedule(w, at(100), TmrOneShot, 2).wheel
+    w = tmrwheel.schedule(w, at(50), TmrOneShot, 3).wheel
+
+    let step = tmrwheel.fire_due(w, at(200))
+
+    test.case("all three")
+    test.assert(list.len(step.fired) == 3)
+
+    test.case("the earliest first")
+    test.assert(step.fired[0].tag == 3)
+
+    test.case("then the tie, in the order they were scheduled")
+    test.assert(step.fired[1].tag == 1)
+    test.assert(step.fired[2].tag == 2)
+
+@test
+fn test_catch_up_owes_every_missed_firing() [io]
+    // A loop busy for half a second, with a hundred-millisecond timer.
+    // `TmrCatchUp` is for the caller where each firing MEANS something
+    // — a sampler, a frame counter, a retry budget — and losing four
+    // of them loses four facts.
+    let s = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(100),
+                                   TmrPeriodic(Duration.of_ms(100)), 1,
+                                   TmrCatchUp, tmrwheel.no_jitter())
+    let step = tmrwheel.fire_due(s.wheel, at(500))
+
+    test.case("five firings, not one")
+    test.assert(list.len(step.fired) == 5)
+
+@test
+fn test_coalesce_folds_the_missed_firings_into_one() [io]
+    // Twenty missed repaints are one repaint.  The count is carried so
+    // that a caller which is also counting something still knows what
+    // it missed.
+    let s = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(100),
+                                   TmrPeriodic(Duration.of_ms(100)), 1,
+                                   TmrCoalesce, tmrwheel.no_jitter())
+    let step = tmrwheel.fire_due(s.wheel, at(500))
+
+    test.case("one firing")
+    test.assert(list.len(step.fired) == 1)
+
+    test.case("that says it covered five periods")
+    test.assert(step.fired[0].periods == 5)
+
+@test
+fn test_coalesce_reschedules_from_now_and_skip_keeps_the_grid() [io]
+    // The difference between the two, and the whole reason there are
+    // three policies: a clock display rescheduled from now drifts a
+    // little further off the second every time the loop is busy, and
+    // after an hour it is visibly wrong.
+    let c = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(1000),
+                                   TmrPeriodic(Duration.of_secs(1)), 1,
+                                   TmrCoalesce, tmrwheel.no_jitter())
+    let k = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(1000),
+                                   TmrPeriodic(Duration.of_secs(1)), 1,
+                                   TmrSkip, tmrwheel.no_jitter())
+
+    // Both are fired 250 ms late.
+    let after_c = tmrwheel.fire_due(c.wheel, at(1250))
+    let after_k = tmrwheel.fire_due(k.wheel, at(1250))
+
+    match tmrwheel.next_due(after_c.wheel)
+        None    => test.assert(false)
+        Some(t) =>
+            test.case("coalesce: a second from when it actually fired")
+            test.assert(tmrclock.mono_ms(t) == 2250)
+
+    match tmrwheel.next_due(after_k.wheel)
+        None    => test.assert(false)
+        Some(t) =>
+            test.case("skip: still on the original grid")
+            test.assert(tmrclock.mono_ms(t) == 2000)
+
+@test
+fn test_cancelling_a_timer_that_already_fired_is_not_an_error() [io]
+    // A caller racing a one-shot against a cancel should not have to
+    // know which of them won.
+    let s = tmrwheel.schedule(tmrwheel.wheel_new(), at(100), TmrOneShot, 1)
+    let after = tmrwheel.fire_due(s.wheel, at(100))
+
+    test.case("cancelling it anyway")
+    test.assert(tmrwheel.is_idle(tmrwheel.cancel(after.wheel, s.id)))
+
+@test
+fn test_a_cancelled_timer_does_not_fire() [io]
+    let s = tmrwheel.schedule(tmrwheel.wheel_new(), at(100), TmrOneShot, 1)
+    let w = tmrwheel.cancel(s.wheel, s.id)
+
+    test.case("gone")
+    test.assert(not tmrwheel.is_scheduled(w, s.id))
+
+    test.case("and nothing fires")
+    test.assert(list.len(tmrwheel.fire_due(w, at(1000)).fired) == 0)
+
+@test
+fn test_timers_can_be_cancelled_as_a_group_by_their_tag() [io]
+    // A program with one timer per pane closes a pane by its tag,
+    // rather than keeping a list of identifiers beside its list of
+    // panes.
+    var w = tmrwheel.wheel_new()
+    w = tmrwheel.schedule(w, at(100), TmrOneShot, 7).wheel
+    w = tmrwheel.schedule(w, at(200), TmrOneShot, 7).wheel
+    w = tmrwheel.schedule(w, at(300), TmrOneShot, 8).wheel
+
+    test.case("two carry the tag")
+    test.assert(list.len(tmrwheel.entries_tagged(w, 7)) == 2)
+
+    let left = tmrwheel.cancel_tagged(w, 7)
+    test.case("and cancelling them leaves the third")
+    test.assert(tmrwheel.scheduled_count(left) == 1)
+
+@test
+fn test_a_timer_can_be_moved_without_losing_what_it_is() [io]
+    let s = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(100),
+                                   TmrPeriodic(Duration.of_ms(100)), 5,
+                                   TmrSkip, tmrwheel.no_jitter())
+    let w = tmrwheel.reschedule(s.wheel, s.id, at(900))
+
+    match tmrwheel.entry_of(w, s.id)
+        None    => test.assert(false)
+        Some(e) =>
+            test.case("the new deadline")
+            test.assert(tmrclock.mono_ms(e.due) == 900)
+
+            test.case("and the same tag")
+            test.assert(e.tag == 5)
+
+@test
+fn test_clearing_a_wheel_leaves_nothing_scheduled() [io]
+    var w = tmrwheel.wheel_new()
+    w = tmrwheel.schedule(w, at(100), TmrOneShot, 1).wheel
+    w = tmrwheel.schedule(w, at(200), TmrOneShot, 2).wheel
+
+    test.case("empty")
+    test.assert(tmrwheel.is_idle(tmrwheel.clear(w)))
+
+@test
+fn test_scheduling_after_a_delay_is_the_form_almost_every_caller_wants() [io]
+    // Almost every deadline is "in so long" rather than "at that
+    // moment", and the arithmetic is one place rather than every
+    // caller's.
+    let s = tmrwheel.schedule_after(tmrwheel.wheel_new(), at(1000),
+                                    Duration.of_ms(250), TmrOneShot, 1)
+
+    match tmrwheel.next_due(s.wheel)
+        None    => test.assert(false)
+        Some(t) =>
+            test.case("a quarter second from the now that was passed in")
+            test.assert(tmrclock.mono_ms(t) == 1250)
+
+@test
+fn test_jitter_moves_a_deadline_but_not_by_more_than_its_spread() [io]
+    // A hundred connections refreshing every thirty seconds, scheduled
+    // at the same moment, wake together forever.  The spread breaks
+    // that up, and the bound is what keeps it from breaking the
+    // schedule instead.
+    let s = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(1000),
+                                   TmrOneShot, 1, TmrCoalesce,
+                                   tmrwheel.jitter(250, 12345))
+
+    match tmrwheel.next_due(s.wheel)
+        None    => test.assert(false)
+        Some(t) =>
+            test.case("within the spread")
+            test.assert(tmrclock.mono_ms(t) >= 1000)
+            test.assert(tmrclock.mono_ms(t) <= 1250)
+
+@test
+fn test_jitter_from_the_same_seed_is_the_same_schedule() [io]
+    // Deterministic on purpose: it keeps the module `[]`, and it makes
+    // a schedule reproducible in a test.  Nothing about a thundering
+    // herd needs unpredictability — the goal is only that two timers
+    // disagree.
+    let a = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(1000), TmrOneShot, 1,
+                                   TmrCoalesce, tmrwheel.jitter(250, 999))
+    let b = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(1000), TmrOneShot, 1,
+                                   TmrCoalesce, tmrwheel.jitter(250, 999))
+
+    match tmrwheel.next_due(a.wheel)
+        None     => test.assert(false)
+        Some(ta) =>
+            match tmrwheel.next_due(b.wheel)
+                None     => test.assert(false)
+                Some(tb) =>
+                    test.case("the same")
+                    test.assert(tmrclock.mono_ms(ta) == tmrclock.mono_ms(tb))
+
+@test
+fn test_a_debounce_keeps_moving_while_something_keeps_happening() [io]
+    // The bug this shape prevents: scheduling a new timer on every
+    // keystroke without cancelling the last, so a fast typist queues
+    // one re-parse per keystroke and every one of them runs.
+    let d0 = tmrwheel.debounce_new(Duration.of_ms(300), 9)
+    let first = tmrwheel.debounce_poke(d0, tmrwheel.wheel_new(), at(0))
+    let second = tmrwheel.debounce_poke(first.debounce, first.wheel, at(100))
+    let third = tmrwheel.debounce_poke(second.debounce, second.wheel, at(200))
+
+    test.case("one timer, not three")
+    test.assert(tmrwheel.scheduled_count(third.wheel) == 1)
+
+    test.case("and it is pending")
+    test.assert(tmrwheel.debounce_is_pending(third.debounce))
+
+    test.case("nothing fires while the typing continues")
+    test.assert(list.len(tmrwheel.fire_due(third.wheel, at(400)).fired) == 0)
+
+    test.case("and it fires 300 ms after the LAST poke")
+    test.assert(list.len(tmrwheel.fire_due(third.wheel, at(500)).fired) == 1)
+
+@test
+fn test_a_debounce_can_be_given_up_on() [io]
+    // What an editor calls when the buffer it was going to re-parse has
+    // been closed.
+    let d0 = tmrwheel.debounce_new(Duration.of_ms(300), 9)
+    let poked = tmrwheel.debounce_poke(d0, tmrwheel.wheel_new(), at(0))
+    let gone = tmrwheel.debounce_cancel(poked.debounce, poked.wheel)
+
+    test.case("nothing scheduled")
+    test.assert(tmrwheel.is_idle(gone.wheel))
+
+    test.case("and nothing pending")
+    test.assert(not tmrwheel.debounce_is_pending(gone.debounce))

@@ -1,0 +1,455 @@
+// tmrwheel.nv — many deadlines, one loop, one clock read.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// `[]` THROUGHOUT, and that is the whole shape.  A timer that fires by
+// itself needs a thread, a runtime, or a signal; a timer a caller
+// POLLS needs none of those, and every terminal program already has
+// the loop to poll it from.  So this module never reads a clock, never
+// sleeps and never spawns: `now` is an argument, and the loop that
+// passes it read it once for everything.
+//
+// THE TWO FUNCTIONS AN EVENT LOOP CALLS are `timeout_ms` and
+// `fire_due`, in that order around its wait:
+//
+//   let wait = tmrwheel.timeout_ms(w, now)   // how long to block
+//   …poll for input with `wait`…             // pty-nv, termios-nv
+//   let now = tmrclock.mono_now()            // ONE clock read
+//   let step = tmrwheel.fire_due(w, now)     // what came due
+//
+// `timeout_ms` is the bridge.  A pump that was going to block in a
+// poll anyway blocks for exactly as long as its nearest deadline
+// allows, so a cursor blink, a debounce and a status refresh cost no
+// wake-ups of their own — which on a laptop is the difference between
+// a program that lets the processor idle and one that does not.
+//
+// A HANDLER IS A TAG, NOT A CLOSURE.  Every entry carries an `Int` the
+// caller chose, and `fire_due` hands those back; the caller matches on
+// them.  A callback would have been shorter to write and would have
+// made the wheel carry a function value per timer, put the caller's
+// state behind a capture the wheel cannot see, and made a fired timer
+// impossible to assert on in a test.  A tag is an integer a test can
+// compare.
+//
+// LATENESS IS A POLICY, because a program that is late has three
+// honest answers and they are not interchangeable — see `TmrPolicy`.
+
+use tmrclock
+
+// A timer's handle within one wheel.
+//
+// Unique within the wheel that issued it and meaningless in any other,
+// which is why it is a type rather than an `Int`.
+pub struct TmrId
+    value: Int
+
+// One-shot, or repeating.
+pub enum TmrKind
+    // Fires once and is gone.
+    TmrOneShot
+    // Fires, and is rescheduled by its policy.
+    TmrPeriodic(period: Duration)
+
+// What a periodic timer does when it is late.
+//
+// A loop that was busy for two seconds with a hundred-millisecond
+// timer owes twenty firings, and there is no single right answer to
+// what to do about that — there are three, and they belong to three
+// different kinds of program.
+pub enum TmrPolicy
+    // Fire once for every period that passed, and keep the original
+    // grid.  A metronome that owes beats: right when each firing
+    // MEANS something that must not be lost — a frame counter, a
+    // sampler, a retry budget.
+    TmrCatchUp
+    // Fire once however many periods passed, and reschedule from now.
+    // Right for anything idempotent: a redraw, a status refresh, a
+    // cache sweep.  Twenty missed repaints are one repaint.
+    TmrCoalesce
+    // Fire once, and reschedule on the ORIGINAL grid rather than from
+    // now.  Right for a clock display: it should tick on the second,
+    // and a policy that rescheduled from now would drift a little
+    // further from the second every time the loop was busy.
+    TmrSkip
+
+// Spread, so that many timers with the same period do not fire
+// together.
+//
+// A hundred connections each refreshing every thirty seconds,
+// scheduled at the same moment, wake together every thirty seconds
+// forever.  Jitter breaks that up, and the classic name for not having
+// it is a thundering herd.
+//
+// THE SPREAD IS DETERMINISTIC, and deliberately so: a seed the wheel
+// advances rather than a random number, which makes a schedule
+// reproducible in a test and keeps this module `[]`.  It is not
+// suitable for anything that needs unpredictability, and nothing here
+// needs unpredictability — the goal is only that two timers disagree.
+pub struct TmrJitter
+    // The most a firing may be moved, in milliseconds.  Zero for none.
+    spread_ms: Int
+    // The state the spread is derived from.  Advanced on every use.
+    seed: Int
+
+// A timer in the wheel.
+pub struct TmrEntry
+    id: TmrId
+    // When it next comes due, on the monotonic clock.
+    due: tmrclock.TmrMonoTime
+    kind: TmrKind
+    policy: TmrPolicy
+    jitter: TmrJitter
+    // The caller's own discriminator, handed back by `fire_due`.  An
+    // integer rather than a closure — see the header.
+    tag: Int
+    // How many periods this firing covers.  1 for a one-shot and for a
+    // periodic timer that was on time; more under `TmrCoalesce`, where
+    // the missed firings were folded into this one and a caller that
+    // is counting something wants to know how many.
+    periods: Int
+
+// A wheel: every scheduled timer, and the next identifier to hand out.
+pub struct TmrWheel
+    entries: [TmrEntry]
+    next_id: Int
+
+// A wheel and the identifier a schedule just produced.
+pub struct TmrScheduled
+    wheel: TmrWheel
+    id: TmrId
+
+// A wheel and what came due.
+//
+// In deadline order, and ties in the order they were scheduled — so a
+// program whose timers depend on each other gets the same sequence
+// every run, which is what makes a bug in one reproducible.
+pub struct TmrFired
+    wheel: TmrWheel
+    fired: [TmrEntry]
+
+// The answer `timeout_ms` gives when nothing is scheduled: block
+// indefinitely.
+//
+// The same convention `poll` uses, and the same one `ptypoll.wait_ready`
+// and `io.wait_either` take, so the number goes straight through.
+pub const TMR_NO_TIMEOUT = 0 - 1
+
+// An empty wheel.
+//
+// ```novo
+// use tmrwheel
+//
+// fn fresh() -> TmrWheel
+//     tmrwheel.wheel_new()
+// ```
+pub fn wheel_new() -> TmrWheel []
+    todo("timer-nv.tmrwheel.wheel_new")
+
+// No jitter.
+//
+// ```novo
+// use tmrwheel
+//
+// fn none() -> TmrJitter
+//     tmrwheel.no_jitter()
+// ```
+pub fn no_jitter() -> TmrJitter []
+    todo("timer-nv.tmrwheel.no_jitter")
+
+// Jitter of up to `spread_ms`, from a seed.
+//
+// The seed makes a schedule reproducible; two programs that want to
+// disagree with each other should pass different ones, which in
+// practice means a process id or a connection number rather than
+// anything random.
+//
+// ```novo
+// use tmrwheel
+//
+// fn spread(seed: Int) -> TmrJitter
+//     tmrwheel.jitter(250, seed)
+// ```
+pub fn jitter(spread_ms: Int, seed: Int) -> TmrJitter []
+    todo("timer-nv.tmrwheel.jitter")
+
+// ── Scheduling ─────────────────────────────────────────────────────
+
+// Schedule a timer for a moment, with the defaults: coalescing, no
+// jitter.
+//
+// ```novo
+// use tmrclock
+// use tmrwheel
+//
+// fn at(w: TmrWheel, t: TmrMonoTime) -> TmrScheduled
+//     tmrwheel.schedule(w, t, TmrOneShot, 1)
+// ```
+pub fn schedule(w: TmrWheel, due: tmrclock.TmrMonoTime, kind: TmrKind, tag: Int) -> TmrScheduled []
+    todo("timer-nv.tmrwheel.schedule")
+
+// Schedule a timer for a delay from now.
+//
+// The form almost every caller wants, because almost every deadline is
+// "in so long" rather than "at that moment".
+//
+// ```novo
+// use std.time
+// use tmrclock
+// use tmrwheel
+//
+// fn soon(w: TmrWheel, now: TmrMonoTime) -> TmrScheduled
+//     tmrwheel.schedule_after(w, now, Duration.of_ms(500), TmrOneShot, 1)
+// ```
+pub fn schedule_after(w: TmrWheel, now: tmrclock.TmrMonoTime, delay: Duration, kind: TmrKind,
+                      tag: Int) -> TmrScheduled []
+    todo("timer-nv.tmrwheel.schedule_after")
+
+// Schedule with the policy and the jitter spelled out.
+//
+// ```novo
+// use tmrclock
+// use tmrwheel
+//
+// fn tick(w: TmrWheel, t: TmrMonoTime, k: TmrKind) -> TmrScheduled
+//     tmrwheel.schedule_with(w, t, k, 2, TmrSkip, tmrwheel.no_jitter())
+// ```
+pub fn schedule_with(w: TmrWheel, due: tmrclock.TmrMonoTime, kind: TmrKind, tag: Int,
+                     policy: TmrPolicy, j: TmrJitter) -> TmrScheduled []
+    todo("timer-nv.tmrwheel.schedule_with")
+
+// Remove a timer.
+//
+// A no-op for an identifier the wheel does not have, which includes
+// one that has already fired — a caller that cancels a one-shot it was
+// racing with should not have to know which of them won.
+//
+// ```novo
+// use tmrwheel
+//
+// fn drop_it(w: TmrWheel, id: TmrId) -> TmrWheel
+//     tmrwheel.cancel(w, id)
+// ```
+pub fn cancel(w: TmrWheel, id: TmrId) -> TmrWheel []
+    todo("timer-nv.tmrwheel.cancel")
+
+// Move a timer to a new deadline, keeping everything else about it.
+//
+// ```novo
+// use tmrclock
+// use tmrwheel
+//
+// fn later(w: TmrWheel, id: TmrId, t: TmrMonoTime) -> TmrWheel
+//     tmrwheel.reschedule(w, id, t)
+// ```
+pub fn reschedule(w: TmrWheel, id: TmrId, due: tmrclock.TmrMonoTime) -> TmrWheel []
+    todo("timer-nv.tmrwheel.reschedule")
+
+// Remove everything.
+//
+// ```novo
+// use tmrwheel
+//
+// fn stop_all(w: TmrWheel) -> TmrWheel
+//     tmrwheel.clear(w)
+// ```
+pub fn clear(w: TmrWheel) -> TmrWheel []
+    todo("timer-nv.tmrwheel.clear")
+
+// ── Polling ────────────────────────────────────────────────────────
+
+// When the next timer comes due, or `None` when none is scheduled.
+//
+// ```novo
+// use tmrclock
+// use tmrwheel
+//
+// fn soonest(w: TmrWheel) -> ?TmrMonoTime
+//     tmrwheel.next_due(w)
+// ```
+pub fn next_due(w: TmrWheel) -> ?tmrclock.TmrMonoTime []
+    todo("timer-nv.tmrwheel.next_due")
+
+// How long a poll should block, in milliseconds.
+//
+// **The bridge to the rest of a program.**  `TMR_NO_TIMEOUT` when
+// nothing is scheduled, `0` when something is already due, and the
+// remaining milliseconds otherwise — which is the convention `poll`
+// takes, and the convention `ptypoll.wait_ready` and `io.wait_either`
+// take, so the number goes straight through with no arithmetic in
+// between.
+//
+// A pump that was going to block anyway now blocks for exactly as long
+// as its nearest deadline allows, and every timer in the wheel costs
+// no wake-up of its own.
+//
+// ```novo
+// use tmrclock
+// use tmrwheel
+//
+// fn how_long(w: TmrWheel, now: TmrMonoTime) -> Int
+//     tmrwheel.timeout_ms(w, now)
+// ```
+pub fn timeout_ms(w: TmrWheel, now: tmrclock.TmrMonoTime) -> Int []
+    todo("timer-nv.tmrwheel.timeout_ms")
+
+// Take everything that is due at `now`, applying each timer's policy.
+//
+// One-shots are removed; periodic ones are rescheduled by their
+// policy.  The list is in deadline order with ties in schedule order,
+// so the same inputs produce the same sequence every run.
+//
+// ```novo
+// use tmrclock
+// use tmrwheel
+//
+// fn tick(w: TmrWheel, now: TmrMonoTime) -> TmrFired
+//     tmrwheel.fire_due(w, now)
+// ```
+pub fn fire_due(w: TmrWheel, now: tmrclock.TmrMonoTime) -> TmrFired []
+    todo("timer-nv.tmrwheel.fire_due")
+
+// How many timers are scheduled.
+//
+// ```novo
+// use tmrwheel
+//
+// fn count(w: TmrWheel) -> Int
+//     tmrwheel.scheduled_count(w)
+// ```
+pub fn scheduled_count(w: TmrWheel) -> Int []
+    todo("timer-nv.tmrwheel.scheduled_count")
+
+// Whether anything is scheduled.
+//
+// ```novo
+// use tmrwheel
+//
+// fn quiet(w: TmrWheel) -> Bool
+//     tmrwheel.is_idle(w)
+// ```
+pub fn is_idle(w: TmrWheel) -> Bool []
+    todo("timer-nv.tmrwheel.is_idle")
+
+// The entry behind an identifier, or `None` when it has fired or been
+// cancelled.
+//
+// ```novo
+// use tmrwheel
+//
+// fn look(w: TmrWheel, id: TmrId) -> ?TmrEntry
+//     tmrwheel.entry_of(w, id)
+// ```
+pub fn entry_of(w: TmrWheel, id: TmrId) -> ?TmrEntry []
+    todo("timer-nv.tmrwheel.entry_of")
+
+// Whether a timer is still scheduled.
+//
+// ```novo
+// use tmrwheel
+//
+// fn live(w: TmrWheel, id: TmrId) -> Bool
+//     tmrwheel.is_scheduled(w, id)
+// ```
+pub fn is_scheduled(w: TmrWheel, id: TmrId) -> Bool []
+    todo("timer-nv.tmrwheel.is_scheduled")
+
+// Every timer carrying a tag, for a caller that cancels a group.
+//
+// A program with one timer per pane cancels a pane's timers by its
+// tag rather than by keeping a list of identifiers beside its list of
+// panes.
+//
+// ```novo
+// use tmrwheel
+//
+// fn pane_timers(w: TmrWheel) -> [TmrEntry]
+//     tmrwheel.entries_tagged(w, 7)
+// ```
+pub fn entries_tagged(w: TmrWheel, tag: Int) -> [TmrEntry] []
+    todo("timer-nv.tmrwheel.entries_tagged")
+
+// Cancel every timer carrying a tag.
+//
+// ```novo
+// use tmrwheel
+//
+// fn close_pane(w: TmrWheel) -> TmrWheel
+//     tmrwheel.cancel_tagged(w, 7)
+// ```
+pub fn cancel_tagged(w: TmrWheel, tag: Int) -> TmrWheel []
+    todo("timer-nv.tmrwheel.cancel_tagged")
+
+// ── Debounce ───────────────────────────────────────────────────────
+
+// A deadline that keeps moving while something keeps happening.
+//
+// An editor re-parses when the typing stops, a search runs when the
+// query settles, a file watcher rebuilds when the writes end.  All
+// three are the same shape and all three are written wrong in the same
+// way — by scheduling a new timer on every event without cancelling
+// the last, so a fast typist queues one re-parse per keystroke and
+// they all run.
+pub struct TmrDebounce
+    // The timer currently pending, or `None` when nothing has happened
+    // recently.
+    pending: ?TmrId
+    // How quiet it has to get.
+    quiet: Duration
+    tag: Int
+
+// A debounce and the wheel it lives in, after a change to either.
+pub struct TmrDebounced
+    debounce: TmrDebounce
+    wheel: TmrWheel
+
+// A debounce that fires `quiet` after the last poke.
+//
+// ```novo
+// use std.time
+// use tmrwheel
+//
+// fn settle() -> TmrDebounce
+//     tmrwheel.debounce_new(Duration.of_ms(300), 9)
+// ```
+pub fn debounce_new(quiet: Duration, tag: Int) -> TmrDebounce []
+    todo("timer-nv.tmrwheel.debounce_new")
+
+// Something happened: cancel the pending timer and start a new one.
+//
+// The cancel is the part that gets forgotten, and forgetting it is
+// what turns a debounce into a queue.
+//
+// ```novo
+// use tmrclock
+// use tmrwheel
+//
+// fn typed(d: TmrDebounce, w: TmrWheel, now: TmrMonoTime) -> TmrDebounced
+//     tmrwheel.debounce_poke(d, w, now)
+// ```
+pub fn debounce_poke(d: TmrDebounce, w: TmrWheel, now: tmrclock.TmrMonoTime) -> TmrDebounced []
+    todo("timer-nv.tmrwheel.debounce_poke")
+
+// Give up on a pending debounce without firing it.
+//
+// What an editor calls when the buffer it was going to re-parse has
+// been closed.
+//
+// ```novo
+// use tmrwheel
+//
+// fn never_mind(d: TmrDebounce, w: TmrWheel) -> TmrDebounced
+//     tmrwheel.debounce_cancel(d, w)
+// ```
+pub fn debounce_cancel(d: TmrDebounce, w: TmrWheel) -> TmrDebounced []
+    todo("timer-nv.tmrwheel.debounce_cancel")
+
+// Whether a debounce is waiting to fire.
+//
+// ```novo
+// use tmrwheel
+//
+// fn waiting(d: TmrDebounce) -> Bool
+//     tmrwheel.debounce_is_pending(d)
+// ```
+pub fn debounce_is_pending(d: TmrDebounce) -> Bool []
+    todo("timer-nv.tmrwheel.debounce_is_pending")

@@ -1,0 +1,202 @@
+// tmrextra_tests.nv — the stopwatch that can be paused, and the
+// limiter that does not allow twice the rate across a boundary.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`.
+//
+// A RATE LIMITER THAT READ ITS OWN CLOCK COULD NOT BE TESTED without
+// waiting for the rate it limits — which for four requests an hour is
+// a test nobody runs.  `now` is an argument, so an hour passes by
+// adding 3600000.
+
+use std.test
+use tmrclock
+use tmrextra
+
+fn at(ms: Int) -> TmrMonoTime
+    tmrclock.mono_of_ms(ms)
+
+@test
+fn test_a_fresh_stopwatch_reads_zero_and_is_not_running() [io]
+    let s = tmrextra.stopwatch_new()
+
+    test.case("zero")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(1000)).ms() == 0)
+
+    test.case("and stopped")
+    test.assert(not tmrextra.stopwatch_is_running(s))
+
+@test
+fn test_a_running_stopwatch_counts_the_time_since_it_started() [io]
+    let s = tmrextra.stopwatch_start(tmrextra.stopwatch_new(), at(1000))
+
+    test.case("running")
+    test.assert(tmrextra.stopwatch_is_running(s))
+
+    test.case("half a second in")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(1500)).ms() == 500)
+
+@test
+fn test_pausing_and_resuming_does_not_lose_what_was_already_counted() [io]
+    // THE ONE EVERYBODY GETS WRONG.  A stopwatch written as a single
+    // start timestamp reports nonsense the first time anything pauses
+    // it, which for a build timer is the first time it waits on a
+    // lock.
+    var s = tmrextra.stopwatch_start(tmrextra.stopwatch_new(), at(0))
+    s = tmrextra.stopwatch_stop(s, at(300))
+
+    test.case("300 ms banked")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(9999)).ms() == 300)
+
+    s = tmrextra.stopwatch_start(s, at(1000))
+
+    test.case("and the second run adds to it rather than replacing it")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(1200)).ms() == 500)
+
+@test
+fn test_a_paused_stopwatch_does_not_advance() [io]
+    var s = tmrextra.stopwatch_start(tmrextra.stopwatch_new(), at(0))
+    s = tmrextra.stopwatch_stop(s, at(100))
+
+    test.case("still 100 ms an hour later")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(3600000)).ms() == 100)
+
+@test
+fn test_starting_an_already_running_stopwatch_changes_nothing() [io]
+    // Rather than resetting `started` and losing everything since —
+    // which is the shape of the bug this is careful about.
+    var s = tmrextra.stopwatch_start(tmrextra.stopwatch_new(), at(0))
+    s = tmrextra.stopwatch_start(s, at(500))
+
+    test.case("still counting from the first start")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(1000)).ms() == 1000)
+
+@test
+fn test_resetting_goes_back_to_zero_and_stops() [io]
+    var s = tmrextra.stopwatch_start(tmrextra.stopwatch_new(), at(0))
+    s = tmrextra.stopwatch_reset(s)
+
+    test.case("zero")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(5000)).ms() == 0)
+
+    test.case("and stopped")
+    test.assert(not tmrextra.stopwatch_is_running(s))
+
+// ── The token bucket ───────────────────────────────────────────────
+
+@test
+fn test_a_new_bucket_starts_full_so_a_program_does_not_look_broken() [io]
+    // A limiter that made its first request wait would look like a
+    // hang.  A caller who wants otherwise takes from it immediately.
+    let b = tmrextra.bucket_new(10, 5, at(0))
+
+    test.case("full")
+    test.assert(tmrextra.bucket_tokens(b, at(0)) == 10)
+
+@test
+fn test_taking_spends_and_refusing_does_not() [io]
+    // A refusal takes nothing: a caller that was refused will ask
+    // again, and a bucket that drained on the refusals would never
+    // allow anything at all.
+    var b = tmrextra.bucket_new(2, 1, at(0))
+
+    let one = tmrextra.bucket_take(b, 1, at(0))
+    test.case("allowed")
+    test.assert(one.allowed)
+    b = one.bucket
+
+    let two = tmrextra.bucket_take(b, 1, at(0))
+    test.case("allowed again — the burst")
+    test.assert(two.allowed)
+    b = two.bucket
+
+    let three = tmrextra.bucket_take(b, 1, at(0))
+    test.case("refused, the burst is spent")
+    test.assert(not three.allowed)
+
+    let four = tmrextra.bucket_take(three.bucket, 1, at(0))
+    test.case("and the refusal cost nothing, so this is the same answer")
+    test.assert(not four.allowed)
+
+@test
+fn test_a_refusal_says_how_long_to_wait() [io]
+    // What a caller puts in a `Retry-After`, and what it hands to
+    // `tmrwheel.schedule_after` to try again — which is why a refusal
+    // answers a duration rather than only `false`.
+    var b = tmrextra.bucket_new(1, 1, at(0))
+    b = tmrextra.bucket_take(b, 1, at(0)).bucket
+
+    let refused = tmrextra.bucket_take(b, 1, at(0))
+
+    test.case("refused")
+    test.assert(not refused.allowed)
+
+    test.case("and a second is when it will be allowed, at one a second")
+    test.assert(refused.retry_after.ms() == 1000)
+
+@test
+fn test_a_bucket_refills_by_computation_rather_than_by_ticking() [io]
+    // No timer behind it: a bucket nobody touches for an hour costs
+    // nothing and is correct when it is next asked.
+    var b = tmrextra.bucket_new(10, 5, at(0))
+    b = tmrextra.bucket_take(b, 10, at(0)).bucket
+
+    test.case("empty")
+    test.assert(tmrextra.bucket_tokens(b, at(0)) == 0)
+
+    test.case("a second later, five back, at five a second")
+    test.assert(tmrextra.bucket_tokens(b, at(1000)) == 5)
+
+@test
+fn test_a_bucket_does_not_refill_past_its_capacity() [io]
+    // The capacity IS the burst, and a bucket that accumulated for an
+    // hour would let an idle client do an hour's worth at once.
+    var b = tmrextra.bucket_new(10, 5, at(0))
+    b = tmrextra.bucket_take(b, 10, at(0)).bucket
+
+    test.case("an hour later, still only ten")
+    test.assert(tmrextra.bucket_tokens(b, at(3600000)) == 10)
+
+@test
+fn test_a_rate_slower_than_one_a_second_is_expressible() [io]
+    // Four an hour cannot be written as an integer per second at all,
+    // which is why tokens are kept in thousandths.
+    var b = tmrextra.bucket_per_interval(4, Duration.of_secs(3600), at(0))
+    b = tmrextra.bucket_take(b, 4, at(0)).bucket
+
+    test.case("empty")
+    test.assert(tmrextra.bucket_tokens(b, at(0)) == 0)
+
+    test.case("and a quarter hour later, one back")
+    test.assert(tmrextra.bucket_tokens(b, at(900000)) == 1)
+
+@test
+fn test_the_wait_is_the_question_without_the_side_effect() [io]
+    // For a caller that wants to schedule rather than to retry.
+    var b = tmrextra.bucket_new(1, 1, at(0))
+
+    test.case("nothing to wait for while it is full")
+    test.assert(tmrextra.bucket_wait_for(b, 1, at(0)).ms() == 0)
+
+    b = tmrextra.bucket_take(b, 1, at(0)).bucket
+
+    test.case("a second once it is empty")
+    test.assert(tmrextra.bucket_wait_for(b, 1, at(0)).ms() == 1000)
+
+    test.case("and asking did not spend anything")
+    test.assert(tmrextra.bucket_wait_for(b, 1, at(0)).ms() == 1000)
+
+@test
+fn test_a_bucket_can_be_filled_or_emptied_when_a_server_says_so() [io]
+    // A quota that renewed, and a server that answered "slow down" —
+    // where the right response is to stop rather than to keep spending
+    // what is left.
+    var b = tmrextra.bucket_new(10, 5, at(0))
+    b = tmrextra.bucket_take(b, 10, at(0)).bucket
+
+    test.case("filled")
+    test.assert(tmrextra.bucket_tokens(tmrextra.bucket_refill(b, at(0)), at(0)) == 10)
+
+    test.case("and emptied")
+    test.assert(tmrextra.bucket_tokens(tmrextra.bucket_drain(
+        tmrextra.bucket_refill(b, at(0)), at(0)),
+        at(0)) == 0)

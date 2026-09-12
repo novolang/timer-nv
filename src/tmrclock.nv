@@ -1,0 +1,299 @@
+// tmrclock.nv — the two clocks, and why they are two types.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// TWO FUNCTIONS IN THIS PACKAGE READ A CLOCK AND THEY ARE BOTH HERE.
+// `mono_now` and `wall_now` are the only `[time]` rows in the whole
+// package; everything else takes a time as an argument.  That is what
+// lets an event loop read the clock ONCE per tick and serve an
+// editor's debounce, a cursor's blink and a status bar's refresh from
+// the same number — and it is what lets every one of those be tested
+// by passing a number rather than by waiting.
+//
+// A MONOTONIC TIME AND A WALL TIME ARE DIFFERENT TYPES BECAUSE THEY
+// ARE DIFFERENT QUANTITIES, and conflating them is a bug with a long
+// history.
+//
+//   A wall clock answers "what time is it" and IS ALLOWED TO JUMP.
+//   NTP steps it, a daylight-saving change moves it, a user sets it,
+//   a virtual machine resuming from a snapshot finds it hours out.
+//   It can move BACKWARDS.
+//
+//   A monotonic clock answers "how long since some arbitrary moment"
+//   and never jumps and never goes backwards.  Its origin is
+//   meaningless and comparing one process's to another's is
+//   meaningless.
+//
+// A TIMEOUT ON A WALL CLOCK IS THE BUG.  "Expire this lease in thirty
+// seconds" computed as `wall_now() + 30s` expires immediately when the
+// clock steps forward, and never when it steps backward.  It has taken
+// down distributed systems, and the fix is always the same: the
+// deadline was a duration and should have been measured on a clock
+// that only measures durations.
+//
+// SO THE WHEEL TAKES MONOTONIC TIME AND ONLY MONOTONIC TIME.  There is
+// no overload of `schedule` that takes a `TmrWallTime`.  An alarm that
+// genuinely means a wall-clock moment — "run the backup at 02:00" — is
+// converted with `wall_deadline_to_mono`, and the conversion is a
+// value the caller REDOES when `clock_stepped` says the relationship
+// between the two clocks has changed.  That is a real cost and it is
+// the caller's, because only the caller knows whether its alarm meant
+// a moment or a delay.
+
+use std.time
+
+// A point on the monotonic clock, in milliseconds.
+//
+// The origin is arbitrary and means nothing: only differences are
+// meaningful, and only within one process.  Never jumps, never goes
+// backwards, unaffected by anything a user or NTP does to the system
+// clock.
+pub struct TmrMonoTime
+    ms: Int
+
+// A point on the wall clock, in milliseconds since the Unix epoch.
+//
+// What a person means by "a time".  Allowed to jump in either
+// direction, which is why nothing in `tmrwheel` accepts one.
+pub struct TmrWallTime
+    unix_ms: Int
+
+// The relationship between the two clocks at one moment.
+//
+// A wall-clock alarm is scheduled by taking one of these and adding a
+// difference; when the system clock steps, the relationship changes
+// and every alarm derived from the old one is now wrong by the size of
+// the step.  Carrying it as a value is what makes that detectable —
+// `clock_stepped` compares a fresh one against the one an alarm was
+// built from.
+pub struct TmrClockOffset
+    mono: TmrMonoTime
+    wall: TmrWallTime
+
+// Read the monotonic clock.
+//
+// One of the two `[time]` functions in this package.  An event loop
+// calls it once per tick and passes the answer to everything else.
+//
+// ```novo
+// use tmrclock
+//
+// fn tick() -> TmrMonoTime [io, time]
+//     tmrclock.mono_now()
+// ```
+pub fn mono_now() -> TmrMonoTime [time]
+    todo("timer-nv.tmrclock.mono_now")
+
+// Read the wall clock.
+//
+// The other `[time]` function.  For an alarm that genuinely means a
+// moment in the day; never for a timeout.
+//
+// ```novo
+// use tmrclock
+//
+// fn what_time() -> TmrWallTime [io, time]
+//     tmrclock.wall_now()
+// ```
+pub fn wall_now() -> TmrWallTime [time]
+    todo("timer-nv.tmrclock.wall_now")
+
+// Both clocks, read together.
+//
+// The pair an alarm is built from, and one call rather than two so
+// that a step between the two reads cannot put them out of agreement
+// by exactly the thing being measured.
+//
+// ```novo
+// use tmrclock
+//
+// fn both() -> TmrClockOffset [io, time]
+//     tmrclock.clock_offset()
+// ```
+pub fn clock_offset() -> TmrClockOffset [time]
+    todo("timer-nv.tmrclock.clock_offset")
+
+// ── Arithmetic, with no clock in it ────────────────────────────────
+
+// A monotonic time from a millisecond count.
+//
+// For a test, and for a caller whose clock reading came from somewhere
+// else — a runtime tick, a frame timestamp, a poll that reported when
+// it returned.
+//
+// ```novo
+// use tmrclock
+//
+// fn at(ms: Int) -> TmrMonoTime
+//     tmrclock.mono_of_ms(ms)
+// ```
+pub fn mono_of_ms(ms: Int) -> TmrMonoTime []
+    todo("timer-nv.tmrclock.mono_of_ms")
+
+// The millisecond count inside a monotonic time.
+//
+// ```novo
+// use tmrclock
+//
+// fn raw(t: TmrMonoTime) -> Int
+//     tmrclock.mono_ms(t)
+// ```
+pub fn mono_ms(t: TmrMonoTime) -> Int []
+    todo("timer-nv.tmrclock.mono_ms")
+
+// A wall time from a Unix millisecond count.
+//
+// ```novo
+// use tmrclock
+//
+// fn at(ms: Int) -> TmrWallTime
+//     tmrclock.wall_of_unix_ms(ms)
+// ```
+pub fn wall_of_unix_ms(ms: Int) -> TmrWallTime []
+    todo("timer-nv.tmrclock.wall_of_unix_ms")
+
+// The Unix millisecond count inside a wall time.
+//
+// ```novo
+// use tmrclock
+//
+// fn raw(t: TmrWallTime) -> Int
+//     tmrclock.wall_unix_ms(t)
+// ```
+pub fn wall_unix_ms(t: TmrWallTime) -> Int []
+    todo("timer-nv.tmrclock.wall_unix_ms")
+
+// A monotonic time a duration later.
+//
+// ```novo
+// use std.time
+// use tmrclock
+//
+// fn in_a_second(t: TmrMonoTime) -> TmrMonoTime
+//     tmrclock.mono_add(t, Duration.of_secs(1))
+// ```
+pub fn mono_add(t: TmrMonoTime, d: Duration) -> TmrMonoTime []
+    todo("timer-nv.tmrclock.mono_add")
+
+// A wall time a duration later.
+//
+// ```novo
+// use std.time
+// use tmrclock
+//
+// fn in_a_minute(t: TmrWallTime) -> TmrWallTime
+//     tmrclock.wall_add(t, Duration.of_secs(60))
+// ```
+pub fn wall_add(t: TmrWallTime, d: Duration) -> TmrWallTime []
+    todo("timer-nv.tmrclock.wall_add")
+
+// How long from `earlier` to `later` on the monotonic clock.
+//
+// Negative when the arguments are the wrong way round, which is a
+// caller's mistake and not a clock going backwards — a monotonic clock
+// cannot.
+//
+// ```novo
+// use std.time
+// use tmrclock
+//
+// fn took(a: TmrMonoTime, b: TmrMonoTime) -> Duration
+//     tmrclock.mono_since(b, a)
+// ```
+pub fn mono_since(later: TmrMonoTime, earlier: TmrMonoTime) -> Duration []
+    todo("timer-nv.tmrclock.mono_since")
+
+// How long from `earlier` to `later` on the wall clock.
+//
+// Meaningful only when no step happened in between, which is exactly
+// what nothing can tell you after the fact — which is the whole reason
+// `mono_since` exists and this one is here for rendering a timestamp
+// difference to a person rather than for measuring anything.
+//
+// ```novo
+// use std.time
+// use tmrclock
+//
+// fn apart(a: TmrWallTime, b: TmrWallTime) -> Duration
+//     tmrclock.wall_since(b, a)
+// ```
+pub fn wall_since(later: TmrWallTime, earlier: TmrWallTime) -> Duration []
+    todo("timer-nv.tmrclock.wall_since")
+
+// Whether `a` is later than `b` on the monotonic clock.
+//
+// ```novo
+// use tmrclock
+//
+// fn past(a: TmrMonoTime, b: TmrMonoTime) -> Bool
+//     tmrclock.mono_after(a, b)
+// ```
+pub fn mono_after(a: TmrMonoTime, b: TmrMonoTime) -> Bool []
+    todo("timer-nv.tmrclock.mono_after")
+
+// Whether `a` is later than `b` on the wall clock.
+//
+// ```novo
+// use tmrclock
+//
+// fn past(a: TmrWallTime, b: TmrWallTime) -> Bool
+//     tmrclock.wall_after(a, b)
+// ```
+pub fn wall_after(a: TmrWallTime, b: TmrWallTime) -> Bool []
+    todo("timer-nv.tmrclock.wall_after")
+
+// ── Alarms: a wall-clock moment, scheduled on a monotonic wheel ────
+
+// The monotonic deadline that corresponds to a wall-clock moment,
+// given the relationship between the clocks.
+//
+// The ONLY bridge between the two, and it is a function rather than an
+// overload of `schedule` so that the conversion is written where a
+// reader can see it happening.  Its answer is correct for exactly as
+// long as the two clocks keep the relationship they had when `offset`
+// was taken.
+//
+// ```novo
+// use tmrclock
+//
+// fn when(o: TmrClockOffset, at: TmrWallTime) -> TmrMonoTime
+//     tmrclock.wall_deadline_to_mono(o, at)
+// ```
+pub fn wall_deadline_to_mono(offset: TmrClockOffset, at: TmrWallTime) -> TmrMonoTime []
+    todo("timer-nv.tmrclock.wall_deadline_to_mono")
+
+// How far the wall clock has moved relative to the monotonic one since
+// an offset was taken.
+//
+// Zero when nothing stepped, which is the ordinary case; a large
+// number after NTP, a daylight-saving change, a user setting the
+// clock, or a virtual machine resuming from a snapshot.
+//
+// ```novo
+// use std.time
+// use tmrclock
+//
+// fn drifted(was: TmrClockOffset, now: TmrClockOffset) -> Duration
+//     tmrclock.clock_step(was, now)
+// ```
+pub fn clock_step(was: TmrClockOffset, now: TmrClockOffset) -> Duration []
+    todo("timer-nv.tmrclock.clock_step")
+
+// Whether the clock has stepped by more than a tolerance.
+//
+// The check a program with wall-clock alarms makes once a tick, and
+// the reason `TmrClockOffset` is a value.  A tolerance rather than an
+// exact comparison because NTP's ordinary behaviour is to SLEW — to
+// run the clock slightly fast or slow until it agrees — and a slew is
+// not a step, so a program that rescheduled on every millisecond of
+// drift would reschedule constantly and for no reason.
+//
+// ```novo
+// use std.time
+// use tmrclock
+//
+// fn jumped(was: TmrClockOffset, now: TmrClockOffset) -> Bool
+//     tmrclock.clock_stepped(was, now, Duration.of_secs(1))
+// ```
+pub fn clock_stepped(was: TmrClockOffset, now: TmrClockOffset, tolerance: Duration) -> Bool []
+    todo("timer-nv.tmrclock.clock_stepped")
