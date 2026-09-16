@@ -59,7 +59,7 @@ The **interface**: every signature and every effect row, and no bodies.
 - **Nothing sleeps and nothing spawns.**  `core.rt.sleep_ms` is one
   deadline for one place; the async runtime is one task per timer; this
   is many deadlines in one loop with no runtime.
-- **Two `[time]` rows in the whole package**, both in `tmrclock`.
+- **Three `[time]` rows in the whole package**, all in `tmrclock`.
 - **No dependencies.**  A duration is the standard library's
   `Duration`; humantime-nv is what a caller parses `"5m"` with, beside
   this package rather than under it.

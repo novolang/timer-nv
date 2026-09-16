@@ -11,8 +11,9 @@ license     = "Apache-2.0"
 # implementation is the 0.1.0 published over it.
 stability   = "draft"
 
-# `host`, and TWO FUNCTIONS IN THE WHOLE PACKAGE DECLARE ANYTHING:
-# `tmrclock.mono_now` and `tmrclock.wall_now`, both `[time]`.
+# `host`, and THREE FUNCTIONS IN THE WHOLE PACKAGE DECLARE ANYTHING:
+# `tmrclock.mono_now`, `tmrclock.wall_now` and `tmrclock.clock_offset`,
+# all `[time]`.
 # Everything else — the wheel, the policies, the jitter, the
 # stopwatch, the token bucket — is `[]`, because a timer that a caller
 # polls is arithmetic over a number the caller supplied.
@@ -23,7 +24,7 @@ stability   = "draft"
 # `core` package has no clock at all, and one that published a timer
 # API with no way to read a clock would be published half-built.  A
 # `core` consumer that wants only the wheel gets it by depending on
-# this package and never calling those two functions, which is a
+# this package and never calling those three functions, which is a
 # claim the effect checker enforces on the consumer's own signatures.
 layer       = "host"
 
