@@ -1,6 +1,6 @@
 [package]
 name        = "timer-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "Deadlines and intervals for a program with one loop and many of them: one-shot and periodic timers in a wheel the caller polls, answering how long its next poll should block and which timers came due.  Monotonic and wall-clock deadlines are two types, because a timeout keyed on a clock that can be set backwards is a famous bug.  Three lateness policies, deterministic jitter, a stopwatch and a token bucket.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
