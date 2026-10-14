@@ -12,12 +12,6 @@ design follows [Tokio](https://docs.rs/tokio/latest/tokio/time/)'s
 [asyncio](https://docs.python.org/3/library/asyncio-eventloop.html)
 event loop, with the firing moved from the runtime to the caller.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What it is
 
 A **timer** here is a deadline, a tag and a rule for what happens when
@@ -108,10 +102,7 @@ fn main() [io, time]
                 println("status")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: timer-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -292,6 +283,7 @@ a loop.
 novo test --isolate tests/tmrwheel_tests.nv  # 20 tests: scheduling, polling, the policies, the debounce
 novo test --isolate tests/tmrextra_tests.nv  # 14 tests: the stopwatch and the token bucket
 novo test --isolate tests/tmrclock_tests.nv  # 12 tests: the two clocks and the conversion between them
+novo test --isolate tests/timer_edge_tests.nv # 7 tests: the boundaries the API suites leave out
 ```
 
 Tokio's `time` module is the reference for the wheel and the interval
@@ -312,31 +304,6 @@ with ties in schedule order, that the same seed gives the same jittered
 schedule, and that a debounce poked repeatedly keeps moving its one
 timer. `tmrclock_tests.nv` asserts that a clock set forward or back by
 an hour is a step and that a slew is not.
-
-The tests compile today and fail at run, each on the
-`not implemented: timer-nv.<module>.<fn>` panic that is its body. That is
-the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `tmrclock.TmrMonoTime`, `.TmrWallTime`, `.TmrClockOffset` | types only |
-| `tmrclock.mono_now`, `.wall_now`, `.clock_offset` | no |
-| `tmrclock.mono_of_ms`, `.mono_ms`, `.wall_of_unix_ms`, `.wall_unix_ms` | no |
-| `tmrclock.mono_add`, `.wall_add`, `.mono_since`, `.wall_since`, `.mono_after`, `.wall_after` | no |
-| `tmrclock.wall_deadline_to_mono`, `.clock_step`, `.clock_stepped` | no |
-| `tmrwheel.TmrId`, `.TmrKind`, `.TmrPolicy`, `.TmrJitter`, `.TmrEntry`, `.TmrWheel`, `.TmrScheduled`, `.TmrFired`, `.TmrDebounce`, `.TmrDebounced` | types only |
-| `tmrwheel.TMR_NO_TIMEOUT` | yes (it is a constant) |
-| `tmrwheel.wheel_new`, `.no_jitter`, `.jitter` | no |
-| `tmrwheel.schedule`, `.schedule_after`, `.schedule_with`, `.cancel`, `.reschedule`, `.clear` | no |
-| `tmrwheel.next_due`, `.timeout_ms`, `.fire_due` | no |
-| `tmrwheel.scheduled_count`, `.is_idle`, `.entry_of`, `.is_scheduled`, `.entries_tagged`, `.cancel_tagged` | no |
-| `tmrwheel.debounce_new`, `.debounce_poke`, `.debounce_cancel`, `.debounce_is_pending` | no |
-| `tmrextra.TmrStopwatch`, `.TmrBucket`, `.TmrTake` | types only |
-| `tmrextra.stopwatch_new`, `.stopwatch_start`, `.stopwatch_stop`, `.stopwatch_reset`, `.stopwatch_elapsed`, `.stopwatch_is_running` | no |
-| `tmrextra.bucket_new`, `.bucket_per_interval`, `.bucket_take`, `.bucket_tokens`, `.bucket_wait_for`, `.bucket_refill`, `.bucket_drain` | no |
 
 ## Licence
 

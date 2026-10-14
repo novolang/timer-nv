@@ -1,7 +1,5 @@
 // tmrwheel.nv — many deadlines, one loop, one clock read.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // `[]` THROUGHOUT, and that is the whole shape.  A timer that fires by
 // itself needs a thread, a runtime, or a signal; a timer a caller
 // POLLS needs none of those, and every terminal program already has
@@ -143,7 +141,9 @@ pub const TMR_NO_TIMEOUT = 0 - 1
 //     tmrwheel.wheel_new()
 // ```
 pub fn wheel_new() -> TmrWheel []
-    todo("timer-nv.tmrwheel.wheel_new")
+    // Identifiers start at one, so a timer never carries the zero a
+    // caller might mistake for an unset identifier.
+    TmrWheel { entries: [], next_id: 1 }
 
 // No jitter.
 //
@@ -154,7 +154,7 @@ pub fn wheel_new() -> TmrWheel []
 //     tmrwheel.no_jitter()
 // ```
 pub fn no_jitter() -> TmrJitter []
-    todo("timer-nv.tmrwheel.no_jitter")
+    TmrJitter { spread_ms: 0, seed: 0 }
 
 // Jitter of up to `spread_ms`, from a seed.
 //
@@ -170,7 +170,7 @@ pub fn no_jitter() -> TmrJitter []
 //     tmrwheel.jitter(250, seed)
 // ```
 pub fn jitter(spread_ms: Int, seed: Int) -> TmrJitter []
-    todo("timer-nv.tmrwheel.jitter")
+    TmrJitter { spread_ms: spread_ms, seed: seed }
 
 // ── Scheduling ─────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ pub fn jitter(spread_ms: Int, seed: Int) -> TmrJitter []
 //     tmrwheel.schedule(w, t, TmrOneShot, 1)
 // ```
 pub fn schedule(w: TmrWheel, due: tmrclock.TmrMonoTime, kind: TmrKind, tag: Int) -> TmrScheduled []
-    todo("timer-nv.tmrwheel.schedule")
+    schedule_with(w, due, kind, tag, TmrCoalesce, no_jitter())
 
 // Schedule a timer for a delay from now.
 //
@@ -202,7 +202,67 @@ pub fn schedule(w: TmrWheel, due: tmrclock.TmrMonoTime, kind: TmrKind, tag: Int)
 // ```
 pub fn schedule_after(w: TmrWheel, now: tmrclock.TmrMonoTime, delay: Duration, kind: TmrKind,
                       tag: Int) -> TmrScheduled []
-    todo("timer-nv.tmrwheel.schedule_after")
+    schedule(w, tmrclock.mono_add(now, delay), kind, tag)
+
+// The next state of a jitter seed: a linear congruential step, so a
+// spread is reproducible from the number the caller chose and advances
+// on every use.
+@wrapping
+fn next_seed(seed: Int) -> Int
+    (seed * 1103515245 + 12345) & 0x7fffffff
+
+// How far a firing is moved, in milliseconds: never more than the
+// spread and never before the deadline it was scheduled for.
+fn spread_of(j: TmrJitter) -> Int
+    if j.spread_ms <= 0
+        0
+    else
+        next_seed(j.seed) % (j.spread_ms + 1)
+
+// The same spread with its seed advanced, which is what an entry keeps
+// so that its next firing is moved by a different amount.
+fn advanced(j: TmrJitter) -> TmrJitter
+    TmrJitter { spread_ms: j.spread_ms, seed: next_seed(j.seed) }
+
+// A deadline with a spread applied to it.
+fn jittered(due: tmrclock.TmrMonoTime, j: TmrJitter) -> tmrclock.TmrMonoTime
+    tmrclock.mono_add(due, Duration.of_ms(spread_of(j)))
+
+// Whether `a` comes before `b` in deadline order, and between equal
+// deadlines in the order the identifiers were issued — which is the
+// order they were scheduled in.  A pair of comparisons rather than one
+// sort key, because a key that is itself a pair is not ordered
+// correctly by a compiled build.
+fn earlier(a: TmrEntry, b: TmrEntry) -> Bool
+    if tmrclock.mono_ms(a.due) == tmrclock.mono_ms(b.due)
+        a.id.value < b.id.value
+    else
+        tmrclock.mono_ms(a.due) < tmrclock.mono_ms(b.due)
+
+// An ordered list with one entry placed into it, before the first
+// entry that comes after it.
+fn inserted(xs: [TmrEntry], e: TmrEntry) -> [TmrEntry]
+    var out: [TmrEntry] = list.with_capacity(list.len(xs) + 1)
+    var placed = false
+    for x in xs
+        if not placed and earlier(e, x)
+            list.push(out, e)
+            placed = true
+        list.push(out, x)
+    if not placed
+        list.push(out, e)
+    out
+
+// The wheel with an entry added, and the identifier spent.  The list
+// is the caller's own copy, so a wheel already held does not change.
+fn with_entry(w: TmrWheel, e: TmrEntry) -> TmrWheel
+    TmrWheel { entries: inserted(w.entries, e), next_id: w.next_id + 1 }
+
+// The same entry with a different deadline, period count and jitter
+// state — the three things that firing or rescheduling changes.
+fn entry_with(e: TmrEntry, due: tmrclock.TmrMonoTime, periods: Int, j: TmrJitter) -> TmrEntry
+    TmrEntry { id: e.id, due: due, kind: e.kind, policy: e.policy, jitter: j, tag: e.tag,
+               periods: periods }
 
 // Schedule with the policy and the jitter spelled out.
 //
@@ -215,7 +275,10 @@ pub fn schedule_after(w: TmrWheel, now: tmrclock.TmrMonoTime, delay: Duration, k
 // ```
 pub fn schedule_with(w: TmrWheel, due: tmrclock.TmrMonoTime, kind: TmrKind, tag: Int,
                      policy: TmrPolicy, j: TmrJitter) -> TmrScheduled []
-    todo("timer-nv.tmrwheel.schedule_with")
+    let id = TmrId { value: w.next_id }
+    let entry = TmrEntry { id: id, due: jittered(due, j), kind: kind, policy: policy,
+                           jitter: advanced(j), tag: tag, periods: 1 }
+    TmrScheduled { wheel: with_entry(w, entry), id: id }
 
 // Remove a timer.
 //
@@ -230,7 +293,11 @@ pub fn schedule_with(w: TmrWheel, due: tmrclock.TmrMonoTime, kind: TmrKind, tag:
 //     tmrwheel.cancel(w, id)
 // ```
 pub fn cancel(w: TmrWheel, id: TmrId) -> TmrWheel []
-    todo("timer-nv.tmrwheel.cancel")
+    var entries: [TmrEntry] = list.with_capacity(list.len(w.entries))
+    for e in w.entries
+        if e.id.value != id.value
+            list.push(entries, e)
+    TmrWheel { entries: entries, next_id: w.next_id }
 
 // Move a timer to a new deadline, keeping everything else about it.
 //
@@ -242,7 +309,15 @@ pub fn cancel(w: TmrWheel, id: TmrId) -> TmrWheel []
 //     tmrwheel.reschedule(w, id, t)
 // ```
 pub fn reschedule(w: TmrWheel, id: TmrId, due: tmrclock.TmrMonoTime) -> TmrWheel []
-    todo("timer-nv.tmrwheel.reschedule")
+    var entries: [TmrEntry] = []
+    for e in w.entries
+        if e.id.value == id.value
+            // The moved timer can now belong anywhere in deadline
+            // order, so it is placed rather than appended.
+            entries = inserted(entries, entry_with(e, due, e.periods, e.jitter))
+        else
+            entries = inserted(entries, e)
+    TmrWheel { entries: entries, next_id: w.next_id }
 
 // Remove everything.
 //
@@ -253,7 +328,9 @@ pub fn reschedule(w: TmrWheel, id: TmrId, due: tmrclock.TmrMonoTime) -> TmrWheel
 //     tmrwheel.clear(w)
 // ```
 pub fn clear(w: TmrWheel) -> TmrWheel []
-    todo("timer-nv.tmrwheel.clear")
+    // The next identifier is kept, so one the wheel has already issued
+    // is never handed out a second time.
+    TmrWheel { entries: [], next_id: w.next_id }
 
 // ── Polling ────────────────────────────────────────────────────────
 
@@ -267,7 +344,11 @@ pub fn clear(w: TmrWheel) -> TmrWheel []
 //     tmrwheel.next_due(w)
 // ```
 pub fn next_due(w: TmrWheel) -> ?tmrclock.TmrMonoTime []
-    todo("timer-nv.tmrwheel.next_due")
+    if list.len(w.entries) == 0
+        None
+    else
+        // The entries are held in deadline order.
+        Some(w.entries[0].due)
 
 // How long a poll should block, in milliseconds.
 //
@@ -290,7 +371,75 @@ pub fn next_due(w: TmrWheel) -> ?tmrclock.TmrMonoTime []
 //     tmrwheel.timeout_ms(w, now)
 // ```
 pub fn timeout_ms(w: TmrWheel, now: tmrclock.TmrMonoTime) -> Int []
-    todo("timer-nv.tmrwheel.timeout_ms")
+    if list.len(w.entries) == 0
+        TMR_NO_TIMEOUT
+    else
+        let left = tmrclock.mono_ms(w.entries[0].due) - tmrclock.mono_ms(now)
+        if left < 0
+            0
+        else
+            left
+
+// One millisecond, which is the smallest grid a period that is not
+// positive can be put on: counting the missed firings divides by it.
+fn positive_ms(ms: Int) -> Int
+    if ms < 1
+        1
+    else
+        ms
+
+// The grid a periodic timer sits on, in milliseconds; zero for a
+// one-shot, which does not repeat.
+fn period_ms(kind: TmrKind) -> Int
+    match kind
+        TmrOneShot          => 0
+        TmrPeriodic(period) => positive_ms(period.ms())
+
+// How many periods passed between a deadline and the moment it is
+// being fired at, counting the one it is due for.
+fn periods_passed(due: tmrclock.TmrMonoTime, now: tmrclock.TmrMonoTime, p: Int) -> Int
+    (tmrclock.mono_ms(now) - tmrclock.mono_ms(due)) / p + 1
+
+// One firing for every period that was missed, each carrying the
+// deadline it stands for.
+fn catch_up(e: TmrEntry, missed: Int, p: Int) -> [TmrEntry]
+    var out: [TmrEntry] = list.with_capacity(missed)
+    for i in 0..missed
+        list.push(out, entry_with(e, tmrclock.mono_add(e.due, Duration.of_ms(i * p)), 1, e.jitter))
+    out
+
+// What one due timer hands back: one firing per missed period under
+// `TmrCatchUp`, one firing covering all of them under `TmrCoalesce`,
+// and one firing under `TmrSkip`.
+fn firings_of(e: TmrEntry, now: tmrclock.TmrMonoTime) -> [TmrEntry]
+    let p = period_ms(e.kind)
+    if p <= 0
+        // A one-shot, firing once and covering its one period.
+        [e]
+    else
+        let missed = periods_passed(e.due, now, p)
+        match e.policy
+            TmrCatchUp  => catch_up(e, missed, p)
+            TmrCoalesce => [entry_with(e, e.due, missed, e.jitter)]
+            TmrSkip     => [entry_with(e, e.due, 1, e.jitter)]
+
+// Where a due periodic timer goes next, or `None` when it does not
+// come back.
+fn after_fire(e: TmrEntry, now: tmrclock.TmrMonoTime) -> ?TmrEntry
+    let p = period_ms(e.kind)
+    if p <= 0
+        None
+    else
+        let missed = periods_passed(e.due, now, p)
+        // The grid policies stay on the deadline they were scheduled
+        // for; coalescing restarts a whole period at the moment it
+        // actually fired.  Every deadline is then spread again, so a
+        // herd stays broken.
+        let base = match e.policy
+            TmrCatchUp  => tmrclock.mono_add(e.due, Duration.of_ms(missed * p))
+            TmrCoalesce => tmrclock.mono_add(now, Duration.of_ms(p))
+            TmrSkip     => tmrclock.mono_add(e.due, Duration.of_ms(missed * p))
+        Some(entry_with(e, jittered(base, e.jitter), 1, advanced(e.jitter)))
 
 // Take everything that is due at `now`, applying each timer's policy.
 //
@@ -306,7 +455,22 @@ pub fn timeout_ms(w: TmrWheel, now: tmrclock.TmrMonoTime) -> Int []
 //     tmrwheel.fire_due(w, now)
 // ```
 pub fn fire_due(w: TmrWheel, now: tmrclock.TmrMonoTime) -> TmrFired []
-    todo("timer-nv.tmrwheel.fire_due")
+    var fired: [TmrEntry] = []
+    var kept: [TmrEntry] = []
+    for e in w.entries
+        // A deadline is due at its own instant: being late is a policy
+        // question, being early is not one.
+        if tmrclock.mono_after(e.due, now)
+            kept = inserted(kept, e)
+        else
+            for f in firings_of(e, now)
+                fired = inserted(fired, f)
+            if let Some(next) = after_fire(e, now)
+                kept = inserted(kept, next)
+    // Both lists are built in deadline order, ties in schedule order,
+    // so a rescheduled timer that lands in front of one that was never
+    // due is already where it belongs.
+    TmrFired { wheel: TmrWheel { entries: kept, next_id: w.next_id }, fired: fired }
 
 // How many timers are scheduled.
 //
@@ -317,7 +481,7 @@ pub fn fire_due(w: TmrWheel, now: tmrclock.TmrMonoTime) -> TmrFired []
 //     tmrwheel.scheduled_count(w)
 // ```
 pub fn scheduled_count(w: TmrWheel) -> Int []
-    todo("timer-nv.tmrwheel.scheduled_count")
+    list.len(w.entries)
 
 // Whether anything is scheduled.
 //
@@ -328,7 +492,7 @@ pub fn scheduled_count(w: TmrWheel) -> Int []
 //     tmrwheel.is_idle(w)
 // ```
 pub fn is_idle(w: TmrWheel) -> Bool []
-    todo("timer-nv.tmrwheel.is_idle")
+    list.len(w.entries) == 0
 
 // The entry behind an identifier, or `None` when it has fired or been
 // cancelled.
@@ -340,7 +504,10 @@ pub fn is_idle(w: TmrWheel) -> Bool []
 //     tmrwheel.entry_of(w, id)
 // ```
 pub fn entry_of(w: TmrWheel, id: TmrId) -> ?TmrEntry []
-    todo("timer-nv.tmrwheel.entry_of")
+    for e in w.entries
+        if e.id.value == id.value
+            return Some(e)
+    None
 
 // Whether a timer is still scheduled.
 //
@@ -351,7 +518,9 @@ pub fn entry_of(w: TmrWheel, id: TmrId) -> ?TmrEntry []
 //     tmrwheel.is_scheduled(w, id)
 // ```
 pub fn is_scheduled(w: TmrWheel, id: TmrId) -> Bool []
-    todo("timer-nv.tmrwheel.is_scheduled")
+    match entry_of(w, id)
+        None    => false
+        Some(_) => true
 
 // Every timer carrying a tag, for a caller that cancels a group.
 //
@@ -366,7 +535,11 @@ pub fn is_scheduled(w: TmrWheel, id: TmrId) -> Bool []
 //     tmrwheel.entries_tagged(w, 7)
 // ```
 pub fn entries_tagged(w: TmrWheel, tag: Int) -> [TmrEntry] []
-    todo("timer-nv.tmrwheel.entries_tagged")
+    var out: [TmrEntry] = list.with_capacity(list.len(w.entries))
+    for e in w.entries
+        if e.tag == tag
+            list.push(out, e)
+    out
 
 // Cancel every timer carrying a tag.
 //
@@ -377,7 +550,11 @@ pub fn entries_tagged(w: TmrWheel, tag: Int) -> [TmrEntry] []
 //     tmrwheel.cancel_tagged(w, 7)
 // ```
 pub fn cancel_tagged(w: TmrWheel, tag: Int) -> TmrWheel []
-    todo("timer-nv.tmrwheel.cancel_tagged")
+    var entries: [TmrEntry] = list.with_capacity(list.len(w.entries))
+    for e in w.entries
+        if e.tag != tag
+            list.push(entries, e)
+    TmrWheel { entries: entries, next_id: w.next_id }
 
 // ── Debounce ───────────────────────────────────────────────────────
 
@@ -402,6 +579,13 @@ pub struct TmrDebounced
     debounce: TmrDebounce
     wheel: TmrWheel
 
+// The wheel with a debounce's pending timer cancelled, which is the
+// step that keeps a burst of events down to one timer.
+fn debounce_cleared(w: TmrWheel, d: TmrDebounce) -> TmrWheel
+    match d.pending
+        None     => w
+        Some(id) => cancel(w, id)
+
 // A debounce that fires `quiet` after the last poke.
 //
 // ```novo
@@ -412,7 +596,7 @@ pub struct TmrDebounced
 //     tmrwheel.debounce_new(Duration.of_ms(300), 9)
 // ```
 pub fn debounce_new(quiet: Duration, tag: Int) -> TmrDebounce []
-    todo("timer-nv.tmrwheel.debounce_new")
+    TmrDebounce { pending: None, quiet: quiet, tag: tag }
 
 // Something happened: cancel the pending timer and start a new one.
 //
@@ -427,7 +611,9 @@ pub fn debounce_new(quiet: Duration, tag: Int) -> TmrDebounce []
 //     tmrwheel.debounce_poke(d, w, now)
 // ```
 pub fn debounce_poke(d: TmrDebounce, w: TmrWheel, now: tmrclock.TmrMonoTime) -> TmrDebounced []
-    todo("timer-nv.tmrwheel.debounce_poke")
+    let s = schedule_after(debounce_cleared(w, d), now, d.quiet, TmrOneShot, d.tag)
+    TmrDebounced { debounce: TmrDebounce { pending: Some(s.id), quiet: d.quiet, tag: d.tag },
+                   wheel: s.wheel }
 
 // Give up on a pending debounce without firing it.
 //
@@ -441,7 +627,8 @@ pub fn debounce_poke(d: TmrDebounce, w: TmrWheel, now: tmrclock.TmrMonoTime) -> 
 //     tmrwheel.debounce_cancel(d, w)
 // ```
 pub fn debounce_cancel(d: TmrDebounce, w: TmrWheel) -> TmrDebounced []
-    todo("timer-nv.tmrwheel.debounce_cancel")
+    TmrDebounced { debounce: TmrDebounce { pending: None, quiet: d.quiet, tag: d.tag },
+                   wheel: debounce_cleared(w, d) }
 
 // Whether a debounce is waiting to fire.
 //
@@ -452,4 +639,6 @@ pub fn debounce_cancel(d: TmrDebounce, w: TmrWheel) -> TmrDebounced []
 //     tmrwheel.debounce_is_pending(d)
 // ```
 pub fn debounce_is_pending(d: TmrDebounce) -> Bool []
-    todo("timer-nv.tmrwheel.debounce_is_pending")
+    match d.pending
+        None    => false
+        Some(_) => true

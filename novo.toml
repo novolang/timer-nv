@@ -1,15 +1,10 @@
 [package]
 name        = "timer-nv"
-version     = "0.0.2"
-description = "Deadlines and intervals for a program with one loop and many of them: one-shot and periodic timers in a wheel the caller polls, answering how long its next poll should block and which timers came due.  Monotonic and wall-clock deadlines are two types, because a timeout keyed on a clock that can be set backwards is a famous bug.  Three lateness policies, deterministic jitter, a stopwatch and a token bucket.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "Deadlines and intervals for a program with one loop and many of them: one-shot and periodic timers in a wheel the caller polls, answering how long its next poll should block and which timers came due.  Monotonic and wall-clock deadlines are two types, because a timeout keyed on a clock that can be set backwards is a famous bug.  Three lateness policies, deterministic jitter, a stopwatch and a token bucket."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+stability   = "experimental"
 
 # `host`, and THREE FUNCTIONS IN THE WHOLE PACKAGE DECLARE ANYTHING:
 # `tmrclock.mono_now`, `tmrclock.wall_now` and `tmrclock.clock_offset`,
@@ -33,7 +28,7 @@ category    = "time"
 tags        = ["timer", "deadline", "interval", "timer-wheel", "debounce", "rate-limit", "token-bucket", "stopwatch", "monotonic"]
 repository  = "https://github.com/novolang/timer-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.20.2"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

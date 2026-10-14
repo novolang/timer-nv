@@ -5,6 +5,45 @@ All notable changes to timer-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-10-10
+
+The **implementation**.  Every body the 0.0.2 interface published is
+written, `novo test --isolate` is green over four suites, and every
+line under `src/` is covered by them, with no `cov: skip` marker
+anywhere.
+
+- **The wheel orders its entries by hand.**  `list.sort_by` with a key
+  that builds a pair from runtime values orders wrongly on the compiled
+  leg — silently, and one call site can be wrong while an identical one
+  beside it is right — so `tmrwheel` keeps a private `earlier(a, b)`
+  comparing deadline then identifier, and a private `inserted(xs, e)`
+  that places one entry into an ordered list with it.  Firing order is
+  the thing the suite is an oracle for, and it needed the pair rather
+  than a sort key.  Filed as
+  `list-sort-by-with-a-pair-valued-key-orders-wrong-on-the-compiled-leg`;
+  put back when it closes.
+- **`stopwatch_elapsed` reads `accumulated` into a name first.**  A
+  method called on a struct field in the position a function answers
+  from leaks one reference per call: `tmrextra_tests.nv` passed every
+  verdict and the run still exited 23.  Filed as
+  `a-method-called-on-a-struct-field-in-answer-position-leaks`; put back
+  when it closes.
+- **`TmrBucket.milli_per_second` holds millionths of a token per
+  second, which is what its doc now says.**  The field's comment said
+  thousandths, the same scale as the store it feeds, and a rate at that
+  scale cannot refill anything below a thousand tokens a second; four
+  an hour is 1111.1 millionths, rounded up so a bucket never refills
+  slower than it says.
+- **`TmrCoalesce` restarts a whole period at the moment it fired**, not
+  on the deadline it missed: twenty missed repaints are one repaint,
+  and the next repaint is one period after the one that happened.
+  `TmrSkip` and `TmrCatchUp` stay on the grid they were scheduled on.
+
+The new tests are in `tests/timer_edge_tests.nv` — a period that is not
+positive, a cancel and a reschedule beside other timers, a bucket whose
+capacity or rate is not positive, and a take of nothing — because the
+API suites are the published oracle and are not edited.
+
 ## 0.0.2 — 2026-09-16
 
 README rewritten to the package README style guide

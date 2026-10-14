@@ -1,8 +1,6 @@
 // tmrextra.nv — the stopwatch and the rate limiter every tool
 // rewrites.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // `[]` THROUGHOUT, like the wheel and for the same reason: `now` is an
 // argument.  A stopwatch that read the clock itself would be a
 // stopwatch a test has to wait for, and a rate limiter that read the
@@ -47,7 +45,8 @@ pub struct TmrStopwatch
 //     tmrextra.stopwatch_new()
 // ```
 pub fn stopwatch_new() -> TmrStopwatch []
-    todo("timer-nv.tmrextra.stopwatch_new")
+    // `started` is a placeholder here: it is read only while running.
+    TmrStopwatch { started: tmrclock.mono_of_ms(0), accumulated: Duration.of_ms(0), running: false }
 
 // Start, or resume.
 //
@@ -63,7 +62,12 @@ pub fn stopwatch_new() -> TmrStopwatch []
 //     tmrextra.stopwatch_start(s, now)
 // ```
 pub fn stopwatch_start(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> TmrStopwatch []
-    todo("timer-nv.tmrextra.stopwatch_start")
+    if s.running
+        // Moving `started` forward would lose the run in progress;
+        // moving it backward would count the pause as time run.
+        s
+    else
+        TmrStopwatch { started: now, accumulated: s.accumulated, running: true }
 
 // Pause, folding this run into the accumulated total.
 //
@@ -75,7 +79,13 @@ pub fn stopwatch_start(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> TmrStopwat
 //     tmrextra.stopwatch_stop(s, now)
 // ```
 pub fn stopwatch_stop(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> TmrStopwatch []
-    todo("timer-nv.tmrextra.stopwatch_stop")
+    if s.running
+        let ran = tmrclock.mono_since(now, s.started)
+        TmrStopwatch { started: s.started, accumulated: s.accumulated.add(ran), running: false }
+    else
+        // A second stop with no start in between would fold the same
+        // run in twice.
+        s
 
 // Back to zero, and stopped.
 //
@@ -86,7 +96,9 @@ pub fn stopwatch_stop(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> TmrStopwatc
 //     tmrextra.stopwatch_reset(s)
 // ```
 pub fn stopwatch_reset(s: TmrStopwatch) -> TmrStopwatch []
-    todo("timer-nv.tmrextra.stopwatch_reset")
+    // Whatever `s` held is exactly what resetting discards, so the
+    // answer is the value a fresh stopwatch has.
+    TmrStopwatch { started: tmrclock.mono_of_ms(0), accumulated: Duration.of_ms(0), running: false }
 
 // How long it has run altogether.
 //
@@ -103,7 +115,15 @@ pub fn stopwatch_reset(s: TmrStopwatch) -> TmrStopwatch []
 //     tmrextra.stopwatch_elapsed(s, now)
 // ```
 pub fn stopwatch_elapsed(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> Duration []
-    todo("timer-nv.tmrextra.stopwatch_elapsed")
+    if s.running
+        // What was banked plus the run in progress, which is the sum
+        // a stopwatch written as one start timestamp loses.  A method
+        // called on a field in the position a function answers from
+        // leaks the value, so the field is read into a name first.
+        let banked = s.accumulated
+        banked.add(tmrclock.mono_since(now, s.started))
+    else
+        s.accumulated
 
 // Whether it is running.
 //
@@ -114,7 +134,7 @@ pub fn stopwatch_elapsed(s: TmrStopwatch, now: tmrclock.TmrMonoTime) -> Duration
 //     tmrextra.stopwatch_is_running(s)
 // ```
 pub fn stopwatch_is_running(s: TmrStopwatch) -> Bool []
-    todo("timer-nv.tmrextra.stopwatch_is_running")
+    s.running
 
 // ── The token bucket ───────────────────────────────────────────────
 
@@ -129,7 +149,7 @@ pub struct TmrBucket
     capacity: Int
     // What it holds now, in thousandths of a token.
     milli_tokens: Int
-    // How fast it refills, in thousandths of a token per second.
+    // How fast it refills, in millionths of a token per second.
     milli_per_second: Int
     // When `milli_tokens` was last brought up to date.
     last: tmrclock.TmrMonoTime
@@ -143,6 +163,64 @@ pub struct TmrTake
     // hands to `tmrwheel.schedule_after` to try again — which is the
     // reason a refusal answers a duration rather than just `false`.
     retry_after: Duration
+
+// A bucket holding everything `capacity` allows, at a rate in
+// millionths of a token per second.
+fn full_bucket(capacity: Int, milli_per_second: Int, now: tmrclock.TmrMonoTime) -> TmrBucket
+    // A capacity below zero is a bucket that holds nothing rather than
+    // one that holds a negative count.
+    let holds = if capacity < 0
+        0
+    else
+        capacity
+    TmrBucket { capacity: holds, milli_tokens: holds * 1000,
+                milli_per_second: milli_per_second, last: now }
+
+// The same bucket holding a different number of thousandths as of a
+// moment, which is every change the functions below make to one.
+fn with_tokens(b: TmrBucket, milli_tokens: Int, last: tmrclock.TmrMonoTime) -> TmrBucket
+    TmrBucket { capacity: b.capacity, milli_tokens: milli_tokens,
+                milli_per_second: b.milli_per_second, last: last }
+
+// The bucket with everything that has refilled since `last` added to
+// it, which is what every read of it does first.
+fn refilled(b: TmrBucket, now: tmrclock.TmrMonoTime) -> TmrBucket
+    let cap = b.capacity * 1000
+    let elapsed = tmrclock.mono_ms(now) - tmrclock.mono_ms(b.last)
+    if elapsed <= 0 or b.milli_per_second <= 0
+        b
+    else
+        let added = elapsed * b.milli_per_second / 1000000
+        if b.milli_tokens + added >= cap
+            // A full bucket banks nothing: time spent at the ceiling
+            // is gone, so one emptied at `now` refills from `now`.
+            with_tokens(b, cap, now)
+        else
+            // A rate is a fraction of a thousandth of a token per
+            // millisecond as often as a whole one, so the time that
+            // did not add up to a thousandth stays in `last` — a
+            // caller polling every tick would otherwise round every
+            // call to nothing.
+            with_tokens(b, b.milli_tokens + added,
+                        tmrclock.mono_of_ms(tmrclock.mono_ms(b.last)
+                                            + added * 1000000 / b.milli_per_second))
+
+// A century, which is how a wait with no end is said in milliseconds:
+// a bucket that does not refill has no moment at which it is ready.
+const TMR_NEVER_MS = 3153600000000
+
+// How long a bucket whose refill is already applied waits for `n`
+// whole tokens; zero when it holds them already.
+fn wait_ms_of(b: TmrBucket, n: Int) -> Int
+    let deficit = n * 1000 - b.milli_tokens
+    if deficit <= 0
+        0
+    else
+        if b.milli_per_second <= 0
+            TMR_NEVER_MS
+        else
+            // Rounded up, so the answer is never a millisecond short.
+            (deficit * 1000000 + b.milli_per_second - 1) / b.milli_per_second
 
 // A bucket that allows `per_second` steadily and `capacity` at once,
 // starting full.
@@ -159,7 +237,7 @@ pub struct TmrTake
 //     tmrextra.bucket_new(10, 5, now)
 // ```
 pub fn bucket_new(capacity: Int, per_second: Int, now: tmrclock.TmrMonoTime) -> TmrBucket []
-    todo("timer-nv.tmrextra.bucket_new")
+    full_bucket(capacity, per_second * 1000000, now)
 
 // A bucket with a rate slower than one per second.
 //
@@ -175,7 +253,16 @@ pub fn bucket_new(capacity: Int, per_second: Int, now: tmrclock.TmrMonoTime) -> 
 //     tmrextra.bucket_per_interval(4, Duration.of_secs(3600), now)
 // ```
 pub fn bucket_per_interval(count: Int, per: Duration, now: tmrclock.TmrMonoTime) -> TmrBucket []
-    todo("timer-nv.tmrextra.bucket_per_interval")
+    let per_ms = per.ms()
+    if per_ms <= 0 or count <= 0
+        // An interval that is not positive names no rate at all, and
+        // a bucket that never refills is the safe way to read that.
+        full_bucket(count, 0, now)
+    else
+        // Rounded up, so that four an hour — 1111.1 millionths of a
+        // token per second — does not refill a fraction of a percent
+        // slower than it says.
+        full_bucket(count, (count * 1000000000 + per_ms - 1) / per_ms, now)
 
 // Take `n` tokens if they are there.
 //
@@ -193,7 +280,19 @@ pub fn bucket_per_interval(count: Int, per: Duration, now: tmrclock.TmrMonoTime)
 //     tmrextra.bucket_take(b, 1, now)
 // ```
 pub fn bucket_take(b: TmrBucket, n: Int, now: tmrclock.TmrMonoTime) -> TmrTake []
-    todo("timer-nv.tmrextra.bucket_take")
+    let r = refilled(b, now)
+    if n <= 0
+        // Nothing to take is allowed, and costs nothing.
+        TmrTake { bucket: r, allowed: true, retry_after: Duration.of_ms(0) }
+    else
+        if n * 1000 <= r.milli_tokens
+            TmrTake { bucket: with_tokens(r, r.milli_tokens - n * 1000, r.last),
+                      allowed: true, retry_after: Duration.of_ms(0) }
+        else
+            // The refusal spends nothing, so a caller that asks again
+            // while it waits does not drain what it is waiting on.
+            TmrTake { bucket: r, allowed: false,
+                      retry_after: Duration.of_ms(wait_ms_of(r, n)) }
 
 // How many whole tokens it holds at `now`.
 //
@@ -208,7 +307,8 @@ pub fn bucket_take(b: TmrBucket, n: Int, now: tmrclock.TmrMonoTime) -> TmrTake [
 //     tmrextra.bucket_tokens(b, now)
 // ```
 pub fn bucket_tokens(b: TmrBucket, now: tmrclock.TmrMonoTime) -> Int []
-    todo("timer-nv.tmrextra.bucket_tokens")
+    // Whole tokens, from a store in thousandths.
+    refilled(b, now).milli_tokens / 1000
 
 // How long until `n` tokens would be available.
 //
@@ -224,7 +324,9 @@ pub fn bucket_tokens(b: TmrBucket, now: tmrclock.TmrMonoTime) -> Int []
 //     tmrextra.bucket_wait_for(b, 1, now)
 // ```
 pub fn bucket_wait_for(b: TmrBucket, n: Int, now: tmrclock.TmrMonoTime) -> Duration []
-    todo("timer-nv.tmrextra.bucket_wait_for")
+    // A read like any other, so the answer is the wait from the
+    // bucket's real state; nothing is spent by asking.
+    Duration.of_ms(wait_ms_of(refilled(b, now), n))
 
 // Fill it to capacity.
 //
@@ -239,7 +341,9 @@ pub fn bucket_wait_for(b: TmrBucket, n: Int, now: tmrclock.TmrMonoTime) -> Durat
 //     tmrextra.bucket_refill(b, now)
 // ```
 pub fn bucket_refill(b: TmrBucket, now: tmrclock.TmrMonoTime) -> TmrBucket []
-    todo("timer-nv.tmrextra.bucket_refill")
+    // Full, and the clock starts again from here, so nothing saved up
+    // before the limit was lifted is spent after it.
+    with_tokens(b, b.capacity * 1000, now)
 
 // Empty it.
 //
@@ -255,4 +359,6 @@ pub fn bucket_refill(b: TmrBucket, now: tmrclock.TmrMonoTime) -> TmrBucket []
 //     tmrextra.bucket_drain(b, now)
 // ```
 pub fn bucket_drain(b: TmrBucket, now: tmrclock.TmrMonoTime) -> TmrBucket []
-    todo("timer-nv.tmrextra.bucket_drain")
+    // Empty, and the clock starts again from here, so nothing that
+    // accrued before the answer arrived is spent after it.
+    with_tokens(b, 0, now)

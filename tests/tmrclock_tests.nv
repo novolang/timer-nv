@@ -1,7 +1,5 @@
 // tmrclock_tests.nv — two clocks, and the one that is allowed to jump.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`.
-//
 // THE ARITHMETIC IS `[]`, so the interesting case — a system clock
 // stepping forward by an hour in the middle of a program — is written
 // by passing two numbers rather than by waiting an hour or by setting

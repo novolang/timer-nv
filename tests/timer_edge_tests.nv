@@ -1,0 +1,171 @@
+// timer_edge_tests.nv — the boundaries the three API suites leave out.
+//
+// Each test here is a case a caller can reach and the API suites do
+// not write down: a period that is not positive, a cancel and a
+// reschedule beside other timers, a bucket whose capacity or rate is
+// not positive, and a take of nothing.  Where a suite pins what the
+// API says, these pin what the implementation decides — a period below
+// a millisecond is one millisecond rather than a division by zero, a
+// capacity below zero is a bucket that holds nothing rather than one
+// that holds a negative count, and a bucket that never refills answers
+// a wait with no end rather than a zero a caller would spin on.
+
+use std.list
+use std.test
+use tmrclock
+use tmrextra
+use tmrwheel
+
+fn at(ms: Int) -> TmrMonoTime
+    tmrclock.mono_of_ms(ms)
+
+@test
+fn test_a_second_stop_with_no_start_between_them_changes_nothing() [io]
+    // Folding the same run into the total twice would count the pause
+    // as time run, so a stop on a stopped stopwatch answers the value
+    // it was handed.
+    var s = tmrextra.stopwatch_start(tmrextra.stopwatch_new(), at(0))
+    s = tmrextra.stopwatch_stop(s, at(100))
+    s = tmrextra.stopwatch_stop(s, at(200))
+
+    test.case("still the one run")
+    test.assert(tmrextra.stopwatch_elapsed(s, at(9999)).ms() == 100)
+
+@test
+fn test_a_period_that_is_not_positive_is_counted_as_a_millisecond() [io]
+    // Counting the missed firings divides by the period, so zero and
+    // anything below it are put on a one-millisecond grid rather than
+    // dividing by zero.
+    let s = tmrwheel.schedule_with(tmrwheel.wheel_new(), at(1000),
+                                   TmrPeriodic(Duration.of_ms(0)), 1,
+                                   TmrSkip, tmrwheel.no_jitter())
+    let step = tmrwheel.fire_due(s.wheel, at(1005))
+
+    test.case("it fires once, as a periodic timer does")
+    test.assert(list.len(step.fired) == 1)
+
+    match tmrwheel.next_due(step.wheel)
+        None    => test.assert(false)
+        Some(t) =>
+            test.case("and comes back on the one-millisecond grid")
+            test.assert(tmrclock.mono_ms(t) == 1006)
+
+@test
+fn test_cancelling_one_timer_leaves_the_others_alone() [io]
+    var w = tmrwheel.wheel_new()
+    let a = tmrwheel.schedule(w, at(100), TmrOneShot, 1)
+    w = a.wheel
+    let b = tmrwheel.schedule(w, at(200), TmrOneShot, 2)
+    w = b.wheel
+    let c = tmrwheel.schedule(w, at(300), TmrOneShot, 3)
+    w = c.wheel
+
+    let left = tmrwheel.cancel(w, b.id)
+
+    test.case("two of the three")
+    test.assert(tmrwheel.scheduled_count(left) == 2)
+
+    test.case("and the cancelled one is not one of them")
+    test.assert(not tmrwheel.is_scheduled(left, b.id))
+
+    let step = tmrwheel.fire_due(left, at(400))
+    test.case("the other two fire, in deadline order")
+    test.assert(step.fired[0].tag == 1)
+    test.assert(step.fired[1].tag == 3)
+
+@test
+fn test_rescheduling_one_timer_leaves_the_others_alone() [io]
+    // The moved timer can now belong anywhere in deadline order, so it
+    // is placed among the ones that stayed rather than appended to
+    // them.
+    var w = tmrwheel.wheel_new()
+    let a = tmrwheel.schedule(w, at(100), TmrOneShot, 1)
+    w = a.wheel
+    let b = tmrwheel.schedule(w, at(200), TmrOneShot, 2)
+    w = b.wheel
+    let c = tmrwheel.schedule(w, at(300), TmrOneShot, 3)
+    w = c.wheel
+
+    let moved = tmrwheel.reschedule(w, b.id, at(50))
+
+    test.case("all three are still there")
+    test.assert(tmrwheel.scheduled_count(moved) == 3)
+
+    test.case("and the moved one is now the nearest")
+    test.assert(tmrwheel.timeout_ms(moved, at(0)) == 50)
+
+    let step = tmrwheel.fire_due(moved, at(400))
+    test.case("firing in the order of the new deadlines")
+    test.assert(step.fired[0].tag == 2)
+    test.assert(step.fired[1].tag == 1)
+    test.assert(step.fired[2].tag == 3)
+
+// ── The token bucket ───────────────────────────────────────────────
+
+@test
+fn test_a_bucket_that_holds_nothing_never_allows_anything() [io]
+    // A capacity below zero is a bucket that holds nothing rather than
+    // one that holds a negative count, and refilling cannot rescue it:
+    // the ceiling is the capacity.
+    let b = tmrextra.bucket_new(0 - 5, 1, at(0))
+
+    test.case("empty to begin with")
+    test.assert(tmrextra.bucket_tokens(b, at(0)) == 0)
+
+    test.case("refused")
+    test.assert(not tmrextra.bucket_take(b, 1, at(0)).allowed)
+
+    test.case("and refilling up to nothing a second later")
+    test.assert(tmrextra.bucket_tokens(b, at(1000)) == 0)
+    test.assert(not tmrextra.bucket_take(b, 1, at(1000)).allowed)
+
+@test
+fn test_a_bucket_with_no_rate_has_no_wait_that_ends() [io]
+    // An interval that is not positive, or a count that is not
+    // positive, names no rate at all.  A wait for a rate that never
+    // arrives is said in centuries rather than as a zero a caller
+    // would spin on.
+    var b = tmrextra.bucket_per_interval(4, Duration.of_ms(0), at(0))
+
+    test.case("the starting burst is still there")
+    test.assert(tmrextra.bucket_tokens(b, at(0)) == 4)
+
+    b = tmrextra.bucket_take(b, 4, at(0)).bucket
+    let refused = tmrextra.bucket_take(b, 1, at(0))
+
+    test.case("refused")
+    test.assert(not refused.allowed)
+
+    test.case("for a wait a century long")
+    test.assert(refused.retry_after.ms() == 3153600000000)
+
+    test.case("and the question without the side effect agrees")
+    test.assert(tmrextra.bucket_wait_for(b, 1, at(0)).ms() == 3153600000000)
+
+    test.case("an hour does not bring it back")
+    test.assert(tmrextra.bucket_tokens(b, at(3600000)) == 0)
+
+    test.case("and a count that is not positive names no rate either")
+    let none = tmrextra.bucket_per_interval(0, Duration.of_secs(1), at(0))
+    test.assert(tmrextra.bucket_tokens(none, at(0)) == 0)
+    test.assert(not tmrextra.bucket_take(none, 1, at(0)).allowed)
+    test.assert(tmrextra.bucket_wait_for(none, 1, at(0)).ms() == 3153600000000)
+
+@test
+fn test_taking_nothing_is_allowed_and_costs_nothing() [io]
+    // A caller whose work turned out to be empty should not be refused
+    // and should not spend anything for asking.
+    let b = tmrextra.bucket_new(1, 1, at(0))
+
+    let zero = tmrextra.bucket_take(b, 0, at(0))
+    test.case("allowed")
+    test.assert(zero.allowed)
+    test.case("with nothing to wait for")
+    test.assert(zero.retry_after.ms() == 0)
+    test.case("and the bucket is untouched")
+    test.assert(tmrextra.bucket_tokens(zero.bucket, at(0)) == 1)
+
+    let below = tmrextra.bucket_take(zero.bucket, 0 - 3, at(0))
+    test.case("a negative take is the same")
+    test.assert(below.allowed)
+    test.assert(tmrextra.bucket_tokens(below.bucket, at(0)) == 1)

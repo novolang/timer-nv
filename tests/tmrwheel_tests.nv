@@ -1,9 +1,6 @@
 // tmrwheel_tests.nv — the deadline a poll gets, and the three answers
 // to being late.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: timer-nv.<module>.<fn>`.
-//
 // NOTHING IN THIS FILE WAITS, and that is the module's claim working.
 // `now` is an argument, so a test of a timer that fires in an hour
 // costs nothing and takes no longer than one that fires in a

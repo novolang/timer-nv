@@ -1,8 +1,6 @@
 // tmrextra_tests.nv — the stopwatch that can be paused, and the
 // limiter that does not allow twice the rate across a boundary.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`.
-//
 // A RATE LIMITER THAT READ ITS OWN CLOCK COULD NOT BE TESTED without
 // waiting for the rate it limits — which for four requests an hour is
 // a test nobody runs.  `now` is an argument, so an hour passes by
